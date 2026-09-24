@@ -43,7 +43,21 @@ jobs:
 
       - name: Build .deb & extract dylib
         run: |
-          make package FINALPACKAGE=1 messages=yes
+          set +e
+          make package FINALPACKAGE=1 messages=yes 2>&1 | tee make.log
+          MAKE_STATUS=${PIPESTATUS[0]}
+          if [ $MAKE_STATUS -ne 0 ]; then
+            echo "## ❌ Lỗi Biên Dịch Clang / Theos" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E "(error:|fatal error:)" -B 2 -A 5 make.log | head -50 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "### 50 dòng cuối của make.log:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 50 make.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit $MAKE_STATUS
+          fi
+          set -e
           # Locate and copy the compiled .dylib directly
           find .theos/ -name "Chess.dylib" -exec cp {} ./DuolingoChess.dylib \;
           if [ ! -f ./DuolingoChess.dylib ]; then
@@ -62,7 +76,7 @@ jobs:
         with:
           name: build-failure-log
           path: |
-            *.log
+            make.log
             .theos/
 
       - name: Upload Dylib Artifact

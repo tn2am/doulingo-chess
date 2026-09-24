@@ -1,19 +1,10 @@
 #import <UIKit/UIKit.h>
-#import <UIKit/UIGestureRecognizerSubclass.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
-#import <math.h>
 #import "engine.h"
 #import "maia.h"
-
-@interface UIGestureRecognizer (TouchEmulation)
-- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event;
-- (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event;
-- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event;
-- (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event;
-@end
 
 #define CH_ACCENT [UIColor colorWithRed:0.35 green:0.75 blue:0.40 alpha:1.0]
 #define CH_WARN   [UIColor colorWithRed:0.95 green:0.30 blue:0.30 alpha:1.0]
@@ -379,6 +370,7 @@ static void showToast(NSString *text) {
 
 // --- AUTOPLAY TOUCH & DRAG SIMULATION ---
 static void chFakeTouchFire(CGPoint ptInWin, UIWindow *win, UITouchPhase phase) {
+    if (!win) return;
     @try {
         UITouch *touch = [[UITouch alloc] init];
         [touch setValue:@(phase) forKey:@"_phase"];
@@ -395,47 +387,14 @@ static void chFakeTouchFire(CGPoint ptInWin, UIWindow *win, UITouchPhase phase) 
         dispatch_once(&once, ^{ sCarrierEvent = [[UIEvent alloc] init]; });
 
         NSSet *touches = [NSSet setWithObject:touch];
-        switch (phase) {
-            case UITouchPhaseBegan:
-                [target touchesBegan:touches withEvent:sCarrierEvent];
-                for (UIView *v = target; v; v = v.superview) {
-                    for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled && [g respondsToSelector:@selector(touchesBegan:withEvent:)]) {
-                            [g touchesBegan:touches withEvent:sCarrierEvent];
-                        }
-                    }
-                }
-                break;
-            case UITouchPhaseMoved:
-                [target touchesMoved:touches withEvent:sCarrierEvent];
-                for (UIView *v = target; v; v = v.superview) {
-                    for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled && [g respondsToSelector:@selector(touchesMoved:withEvent:)]) {
-                            [g touchesMoved:touches withEvent:sCarrierEvent];
-                        }
-                    }
-                }
-                break;
-            case UITouchPhaseCancelled:
-                [target touchesCancelled:touches withEvent:sCarrierEvent];
-                for (UIView *v = target; v; v = v.superview) {
-                    for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled && [g respondsToSelector:@selector(touchesCancelled:withEvent:)]) {
-                            [g touchesCancelled:touches withEvent:sCarrierEvent];
-                        }
-                    }
-                }
-                break;
-            default:
-                [target touchesEnded:touches withEvent:sCarrierEvent];
-                for (UIView *v = target; v; v = v.superview) {
-                    for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled && [g respondsToSelector:@selector(touchesEnded:withEvent:)]) {
-                            [g touchesEnded:touches withEvent:sCarrierEvent];
-                        }
-                    }
-                }
-                break;
+        if (phase == UITouchPhaseBegan) {
+            [target touchesBegan:touches withEvent:sCarrierEvent];
+        } else if (phase == UITouchPhaseMoved) {
+            [target touchesMoved:touches withEvent:sCarrierEvent];
+        } else if (phase == UITouchPhaseCancelled) {
+            [target touchesCancelled:touches withEvent:sCarrierEvent];
+        } else {
+            [target touchesEnded:touches withEvent:sCarrierEvent];
         }
     } @catch (NSException *e) {
         dbg([NSString stringWithFormat:@"Lỗi giả lập chạm: %@", e.reason]);
