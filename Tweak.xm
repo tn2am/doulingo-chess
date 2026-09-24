@@ -8,47 +8,63 @@
 
 #define CH_ACCENT [UIColor colorWithRed:0.35 green:0.75 blue:0.40 alpha:1.0]
 
-#define PREF_ELO     @"DuoChess_ELO"
-#define PREF_ENABLED @"DuoChess_Enabled"
-#define PREF_WINPCT  @"DuoChess_WinPct"
-#define PREF_ARROWS  @"DuoChess_ArrowCount"
-#define PREF_ALPHA   @"DuoChess_ArrowAlpha"
-#define PREF_THICK   @"DuoChess_ArrowThick"
-#define PREF_EVALCLR @"DuoChess_ArrowEvalColor"
-#define PREF_EVALLBL @"DuoChess_EvalLabels"
-#define PREF_USEMAIA @"DuoChess_UseMaia"
-#define DEFAULT_ELO  1200
+#define PREF_ELO         @"DuoChess_ELO"
+#define PREF_ENABLED     @"DuoChess_Enabled"
+#define PREF_WINPCT      @"DuoChess_WinPct"
+#define PREF_ARROWS      @"DuoChess_ArrowCount"
+#define PREF_ALPHA       @"DuoChess_ArrowAlpha"
+#define PREF_THICK       @"DuoChess_ArrowThick"
+#define PREF_EVALCLR     @"DuoChess_ArrowEvalColor"
+#define PREF_EVALLBL     @"DuoChess_EvalLabels"
+#define PREF_USEMAIA     @"DuoChess_UseMaia"
+#define PREF_AUTOPLAY    @"DuoChess_AutoPlay"
+#define PREF_APDELAY     @"DuoChess_AutoPlayDelay"
+#define PREF_APJITEN     @"DuoChess_AutoPlayJitterEnabled"
+#define PREF_APJITRNG    @"DuoChess_AutoPlayJitterRange"
+#define PREF_AP2ND       @"DuoChess_AutoPlaySecondBest"
+#define PREF_AP2NDPCT    @"DuoChess_AutoPlaySecondBestPct"
 
-static NSInteger gElo            = DEFAULT_ELO;
-static BOOL      gEnabled        = YES;
-static BOOL      gShowWinPct     = NO;
-static NSInteger gArrowCount     = 1;
-static CGFloat   gArrowAlpha     = 0.75;
-static CGFloat   gArrowThick     = 1.0;
-static BOOL      gArrowEvalColor = YES;
-static BOOL      gShowEvalLabels = YES;
-static BOOL      gUseMaia        = NO;
+#define DEFAULT_ELO      1200
 
+// --- GLOBAL PREFERENCES ---
+static NSInteger gElo                  = DEFAULT_ELO;
+static BOOL      gEnabled              = YES;
+static BOOL      gShowWinPct           = NO;
+static NSInteger gArrowCount           = 1;
+static CGFloat   gArrowAlpha           = 0.75;
+static CGFloat   gArrowThick           = 1.0;
+static BOOL      gArrowEvalColor       = YES;
+static BOOL      gShowEvalLabels       = YES;
+static BOOL      gUseMaia              = NO;
+static BOOL      gAutoPlay             = NO;
+static double    gAutoPlayDelay        = 0.8;
+static BOOL      gAutoPlayJitterEnabled = YES;
+static double    gAutoPlayJitterRange  = 0.4;
+static BOOL      gAutoPlaySecondBest   = YES;
+static NSInteger gAutoPlaySecondBestPct = 10;
+
+// --- STATE VARIABLES ---
 static NSString *gCurrentFen     = nil;
 static NSString *gLastEvalFen    = nil;
+static NSString *gPendingFen     = nil;
+static NSString *gLastAutoPlayed = nil;
 static BOOL      gFetching       = NO;
 static __weak UIView *gBoardView = nil;
 static BOOL      gBoardFlipped   = NO;
 static NSMutableArray *gArrowLayers = nil;
 static NSArray        *gCurrentArrows = nil;
 
-// Captured game state references
-static __weak id gLatestGameState  = nil;
-static __weak id gLatestBoardState = nil;
-static __weak id gLatestFenObj     = nil;
+// Best move and evaluation for UI display
+static NSString *gBestMoveStr    = nil;
+static NSString *gBestEvalStr    = nil;
 
-static UIWindow *gBtnWin   = nil;
-static UIButton *gFloatBtn = nil;
-static UIWindow *gMenuWin  = nil;
-static UILabel  *gEloLabel = nil;
-static UILabel  *gStatusLabel = nil;
+// Captured game state references
+static __weak id gLatestGameState = nil;
+
+static UIWindow *gBtnWin      = nil;
+static UIButton *gFloatBtn    = nil;
+static UIWindow *gMenuWin     = nil;
 static BOOL      gSkipNextTap = NO;
-static NSTimer  *gAutoPollTimer = nil;
 
 // --- LOGGING ---
 static NSMutableArray *gLog = nil;
@@ -60,7 +76,7 @@ static void dbg(NSString *msg) {
         [NSDateFormatter localizedStringFromDate:[NSDate date]
             dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterMediumStyle], msg];
     [gLog addObject:line];
-    while (gLog.count > 150) [gLog removeObjectAtIndex:0];
+    while (gLog.count > 200) [gLog removeObjectAtIndex:0];
 
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -85,6 +101,12 @@ static void savePrefs(void) {
     [d setBool:gArrowEvalColor forKey:PREF_EVALCLR];
     [d setBool:gShowEvalLabels forKey:PREF_EVALLBL];
     [d setBool:gUseMaia forKey:PREF_USEMAIA];
+    [d setBool:gAutoPlay forKey:PREF_AUTOPLAY];
+    [d setDouble:gAutoPlayDelay forKey:PREF_APDELAY];
+    [d setBool:gAutoPlayJitterEnabled forKey:PREF_APJITEN];
+    [d setDouble:gAutoPlayJitterRange forKey:PREF_APJITRNG];
+    [d setBool:gAutoPlaySecondBest forKey:PREF_AP2ND];
+    [d setInteger:gAutoPlaySecondBestPct forKey:PREF_AP2NDPCT];
     [d synchronize];
 }
 
@@ -99,21 +121,38 @@ static void loadPrefs(void) {
     if ([d objectForKey:PREF_EVALCLR]) gArrowEvalColor = [d boolForKey:PREF_EVALCLR];
     if ([d objectForKey:PREF_EVALLBL]) gShowEvalLabels = [d boolForKey:PREF_EVALLBL];
     if ([d objectForKey:PREF_USEMAIA]) gUseMaia = [d boolForKey:PREF_USEMAIA];
+    if ([d objectForKey:PREF_AUTOPLAY]) gAutoPlay = [d boolForKey:PREF_AUTOPLAY];
+    if ([d objectForKey:PREF_APDELAY]) gAutoPlayDelay = [d doubleForKey:PREF_APDELAY];
+    if ([d objectForKey:PREF_APJITEN]) gAutoPlayJitterEnabled = [d boolForKey:PREF_APJITEN];
+    if ([d objectForKey:PREF_APJITRNG]) gAutoPlayJitterRange = [d doubleForKey:PREF_APJITRNG];
+    if ([d objectForKey:PREF_AP2ND]) gAutoPlaySecondBest = [d boolForKey:PREF_AP2ND];
+    if ([d objectForKey:PREF_AP2NDPCT]) gAutoPlaySecondBestPct = [d integerForKey:PREF_AP2NDPCT];
+
     if (gArrowCount < 1) gArrowCount = 1; if (gArrowCount > 3) gArrowCount = 3;
 }
 
-// --- HELPER MATH & PARSING ---
+// --- TIER NAMES (VIETNAMESE) ---
+static NSString *eloTierName(NSInteger elo) {
+    if (elo <= 600)  return @"Mới bắt đầu";
+    if (elo <= 1000) return @"Tập sự";
+    if (elo <= 1400) return @"Phong trào";
+    if (elo <= 1800) return @"Trung cấp";
+    if (elo <= 2200) return @"Cao cấp";
+    if (elo <= 2600) return @"Kiện tướng (Master)";
+    return @"Đại kiện tướng (GM)";
+}
+
 static NSInteger eloToDepth(NSInteger elo) {
-    if (elo >= 3000) return 18;
-    if (elo >= 2400) return 16;
-    if (elo >= 2000) return 14;
-    if (elo >= 1600) return 11;
-    if (elo >= 1200) return 9;
+    if (elo >= 2600) return 16;
+    if (elo >= 2200) return 14;
+    if (elo >= 1800) return 12;
+    if (elo >= 1400) return 10;
+    if (elo >= 1000) return 8;
     return 6;
 }
 
 static BOOL parseMoveUCI(NSString *uci, int *fromSq, int *toSq) {
-    if (uci.length < 4) return NO;
+    if (!uci || uci.length < 4) return NO;
     const char *s = [uci UTF8String];
     int f1 = s[0] - 'a', r1 = s[1] - '1';
     int f2 = s[2] - 'a', r2 = s[3] - '1';
@@ -158,7 +197,12 @@ static UIBezierPath *arrowPath(CGPoint from, CGPoint to, CGFloat headLen, CGFloa
     return path;
 }
 
+// Thread-safe clear arrows
 static void clearArrows(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ clearArrows(); });
+        return;
+    }
     if (gArrowLayers) {
         for (CALayer *l in gArrowLayers) [l removeFromSuperlayer];
         [gArrowLayers removeAllObjects];
@@ -166,7 +210,12 @@ static void clearArrows(void) {
     gCurrentArrows = nil;
 }
 
+// Thread-safe draw arrows
 static void drawArrows(NSArray *arrows, UIView *board, BOOL flipped) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ drawArrows(arrows, board, flipped); });
+        return;
+    }
     if (!board || !board.window) return;
     clearArrows();
     gCurrentArrows = [arrows copy];
@@ -222,316 +271,6 @@ static void drawArrows(NSArray *arrows, UIView *board, BOOL flipped) {
     }
 }
 
-// --- ENGINE INTEGRATION ---
-static void processFen(NSString *fen) {
-    if (!fen || ![fen isKindOfClass:[NSString class]] || fen.length < 10) return;
-
-    // Normalize FEN string: ensure standard 6 fields
-    NSString *cleanFen = [fen stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSArray *parts = [cleanFen componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    if (parts.count < 2) {
-        cleanFen = [NSString stringWithFormat:@"%@ w KQkq - 0 1", cleanFen];
-    } else if (parts.count < 4) {
-        cleanFen = [NSString stringWithFormat:@"%@ - - 0 1", cleanFen];
-    }
-
-    gCurrentFen = [cleanFen copy];
-
-    if (gStatusLabel) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *preview = cleanFen.length > 25 ? [cleanFen substringToIndex:25] : cleanFen;
-            gStatusLabel.text = [NSString stringWithFormat:@"Đã kết nối: %@...", preview];
-            gStatusLabel.textColor = CH_ACCENT;
-        });
-    }
-
-    if (!gEnabled) return;
-    if ([cleanFen isEqualToString:gLastEvalFen] && gCurrentArrows.count) return;
-
-    gLastEvalFen = [cleanFen copy];
-    gFetching = YES;
-
-    dbg([NSString stringWithFormat:@"Stockfish phân tích FEN: %@", cleanFen]);
-
-    if (gUseMaia && MaiaAvailable()) {
-        MaiaGo([cleanFen UTF8String], (int)gElo, (int)gElo, ^(MaiaResult res) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                gFetching = NO;
-                if (!res.ok) return;
-                NSString *mv = [NSString stringWithUTF8String:res.move];
-                NSDictionary *arrow = @{
-                    @"move": mv,
-                    @"eval": @(res.whiteEval),
-                    @"label": [NSString stringWithFormat:@"%.0f%%", res.winPct],
-                    @"rank": @0
-                };
-                if (gBoardView) drawArrows(@[arrow], gBoardView, gBoardFlipped);
-            });
-        });
-        return;
-    }
-
-    int depth = (int)eloToDepth(gElo);
-    int multipv = (int)gArrowCount;
-
-    EngineGo([cleanFen UTF8String], depth, (int)gElo, multipv, ^(const EngineLine *lines, int count) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            gFetching = NO;
-            if (count <= 0) return;
-            NSMutableArray *arrows = [NSMutableArray array];
-            for (int i = 0; i < count; i++) {
-                NSString *mv = [NSString stringWithUTF8String:lines[i].move];
-                double scorePawns = lines[i].score / 100.0;
-                NSString *lbl = lines[i].isMate ?
-                    [NSString stringWithFormat:@"M%d", lines[i].score] :
-                    [NSString stringWithFormat:@"%+.1f", scorePawns];
-                [arrows addObject:@{
-                    @"move": mv,
-                    @"eval": @(scorePawns),
-                    @"label": lbl,
-                    @"rank": @(i)
-                }];
-            }
-            if (gBoardView) drawArrows(arrows, gBoardView, gBoardFlipped);
-        });
-    });
-}
-
-// --- FEN RECONSTRUCTION & EXTRACTION HELPERS ---
-
-static void updateOrientationFromGameState(id gs) {
-    if (!gs) return;
-    SEL userColSel = NSSelectorFromString(@"userColor");
-    if ([gs respondsToSelector:userColSel]) {
-        id uc = ((id (*)(id, SEL))objc_msgSend)(gs, userColSel);
-        if (uc) {
-            NSString *desc = [[uc description] lowercaseString];
-            if ([desc containsString:@"black"]) {
-                gBoardFlipped = YES;
-            } else if ([desc containsString:@"white"]) {
-                gBoardFlipped = NO;
-            }
-        }
-    }
-}
-
-static NSString *extractFenFromGameState(id gs) {
-    if (!gs) return nil;
-    updateOrientationFromGameState(gs);
-
-    // 1. Try gs.fen -> fenString
-    SEL fenSel = NSSelectorFromString(@"fen");
-    if ([gs respondsToSelector:fenSel]) {
-        id fenObj = ((id (*)(id, SEL))objc_msgSend)(gs, fenSel);
-        if (fenObj) {
-            gLatestFenObj = fenObj;
-            SEL fenStrSel = NSSelectorFromString(@"fenString");
-            if ([fenObj respondsToSelector:fenStrSel]) {
-                NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fenStrSel);
-                if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
-                    return fs;
-                }
-            }
-        }
-    }
-
-    // 2. Try gs.setupModel -> fenNotation
-    SEL setupSel = NSSelectorFromString(@"setupModel");
-    if ([gs respondsToSelector:setupSel]) {
-        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
-        if (sm) {
-            SEL fnSel = NSSelectorFromString(@"fenNotation");
-            if ([sm respondsToSelector:fnSel]) {
-                NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
-                if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
-                    return fn;
-                }
-            }
-        }
-    }
-
-    // 3. Try gs.chessBoardState -> reconstruct 8x8 pieces
-    SEL bsSel = NSSelectorFromString(@"chessBoardState");
-    if ([gs respondsToSelector:bsSel]) {
-        id bs = ((id (*)(id, SEL))objc_msgSend)(gs, bsSel);
-        if (bs) {
-            gLatestBoardState = bs;
-            SEL chessSel = NSSelectorFromString(@"chess");
-            if ([bs respondsToSelector:chessSel]) {
-                NSArray *rows = ((NSArray *(*)(id, SEL))objc_msgSend)(bs, chessSel);
-                if ([rows isKindOfClass:[NSArray class]] && rows.count == 8) {
-                    NSMutableString *fenBuilder = [NSMutableString string];
-                    for (int r = 0; r < 8; r++) {
-                        id rowObj = rows[r];
-                        if (![rowObj isKindOfClass:[NSArray class]]) continue;
-                        NSArray *row = (NSArray *)rowObj;
-                        int emptyCount = 0;
-                        for (int c = 0; c < 8 && c < (int)row.count; c++) {
-                            id piece = row[c];
-                            if (!piece || piece == [NSNull null]) {
-                                emptyCount++;
-                            } else {
-                                SEL symSel = NSSelectorFromString(@"fenSymbol");
-                                NSString *sym = nil;
-                                if ([piece respondsToSelector:symSel]) {
-                                    sym = ((NSString *(*)(id, SEL))objc_msgSend)(piece, symSel);
-                                }
-                                if (sym && sym.length) {
-                                    if (emptyCount > 0) {
-                                        [fenBuilder appendFormat:@"%d", emptyCount];
-                                        emptyCount = 0;
-                                    }
-                                    [fenBuilder appendString:sym];
-                                } else {
-                                    emptyCount++;
-                                }
-                            }
-                        }
-                        if (emptyCount > 0) {
-                            [fenBuilder appendFormat:@"%d", emptyCount];
-                        }
-                        if (r < 7) [fenBuilder appendString:@"/"];
-                    }
-
-                    NSString *activeTurn = @"w";
-                    SEL curSel = NSSelectorFromString(@"currentPlayer");
-                    if ([gs respondsToSelector:curSel]) {
-                        id cp = ((id (*)(id, SEL))objc_msgSend)(gs, curSel);
-                        if (cp && [[[cp description] lowercaseString] containsString:@"black"]) {
-                            activeTurn = @"b";
-                        }
-                    }
-                    [fenBuilder appendFormat:@" %@ KQkq - 0 1", activeTurn];
-                    return fenBuilder;
-                }
-            }
-        }
-    }
-
-    return nil;
-}
-
-// Deep search view hierarchy for ChessBoardView
-static UIView *findChessBoardViewInView(UIView *root) {
-    if (!root) return nil;
-    NSString *clsName = NSStringFromClass([root class]);
-    if ([clsName containsString:@"ChessBoardView"] || [clsName containsString:@"StaticChessBoardView"]) {
-        return root;
-    }
-    for (UIView *sub in root.subviews) {
-        UIView *found = findChessBoardViewInView(sub);
-        if (found) return found;
-    }
-    return nil;
-}
-
-static UIView *findActiveBoardView(void) {
-    if (gBoardView && gBoardView.window) return gBoardView;
-
-    UIWindow *keyWindow = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (w.isKeyWindow && w != gBtnWin && w != gMenuWin) {
-                        keyWindow = w; break;
-                    }
-                }
-            }
-            if (keyWindow) break;
-        }
-    }
-    if (!keyWindow) {
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (w != gBtnWin && w != gMenuWin && !w.hidden) {
-                keyWindow = w; break;
-            }
-        }
-    }
-    if (keyWindow) {
-        UIView *found = findChessBoardViewInView(keyWindow);
-        if (found) {
-            gBoardView = found;
-            return found;
-        }
-    }
-    return nil;
-}
-
-// Inspect properties / ivars of a view or controller to locate GameState
-static id findGameStateInObject(id obj, int depth) {
-    if (!obj || depth > 2) return nil;
-
-    Class cls = [obj class];
-    unsigned int ivarCount = 0;
-    Ivar *ivars = class_copyIvarList(cls, &ivarCount);
-    if (ivars) {
-        for (unsigned int i = 0; i < ivarCount; i++) {
-            const char *ivarName = ivar_getName(ivars[i]);
-            if (!ivarName) continue;
-            NSString *name = [NSString stringWithUTF8String:ivarName];
-            if ([name containsString:@"gameState"] || [name containsString:@"GameState"] ||
-                [name containsString:@"boardState"] || [name containsString:@"BoardState"]) {
-                id val = object_getIvar(obj, ivars[i]);
-                if (val) {
-                    free(ivars);
-                    return val;
-                }
-            }
-        }
-        free(ivars);
-    }
-    return nil;
-}
-
-// Continuous background auto-reader (Runs every 0.8s)
-static void performAutoBoardScan(void) {
-    UIView *board = findActiveBoardView();
-    if (!board) return;
-
-    // 1. Try latest game state
-    if (gLatestGameState) {
-        NSString *fen = extractFenFromGameState(gLatestGameState);
-        if (fen.length > 10) {
-            if (![fen isEqualToString:gCurrentFen]) {
-                dbg([NSString stringWithFormat:@"[Tự Động] Bắt FEN mới từ GameState: %@", fen]);
-                processFen(fen);
-            }
-            return;
-        }
-    }
-
-    // 2. Scan board ivars
-    id foundState = findGameStateInObject(board, 0);
-    if (foundState) {
-        gLatestGameState = foundState;
-        NSString *fen = extractFenFromGameState(foundState);
-        if (fen.length > 10) {
-            dbg([NSString stringWithFormat:@"[Tự Động] Bắt FEN từ board ivars: %@", fen]);
-            processFen(fen);
-            return;
-        }
-    }
-
-    // 3. Scan board viewController
-    UIResponder *resp = board.nextResponder;
-    while (resp && ![resp isKindOfClass:[UIViewController class]]) {
-        resp = resp.nextResponder;
-    }
-    if (resp) {
-        id vcState = findGameStateInObject(resp, 0);
-        if (vcState) {
-            gLatestGameState = vcState;
-            NSString *fen = extractFenFromGameState(vcState);
-            if (fen.length > 10) {
-                dbg([NSString stringWithFormat:@"[Tự Động] Bắt FEN từ viewController: %@", fen]);
-                processFen(fen);
-                return;
-            }
-        }
-    }
-}
-
 // --- TOAST NOTIFICATION ---
 static void showToast(NSString *text) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -566,76 +305,762 @@ static void showToast(NSString *text) {
     });
 }
 
-// --- FLOATING BUTTON & UI ---
-@interface DuoChessBtnHandler : NSObject
-+ (void)floatBtnTapped;
-+ (void)handlePan:(UIPanGestureRecognizer *)pan;
-+ (void)handleLongPress:(UILongPressGestureRecognizer *)lp;
+// --- AUTOPLAY TOUCH SIMULATION ---
+static void simulateTapOnBoard(UIView *board, CGPoint localPoint) {
+    if (!board || !board.window) return;
+    UIWindow *win = board.window;
+    CGRect winRect = [board convertRect:board.bounds toView:nil];
+    CGPoint ptInWin = CGPointMake(winRect.origin.x + localPoint.x, winRect.origin.y + localPoint.y);
+
+    @try {
+        UITouch *touch = [[UITouch alloc] init];
+        [touch setValue:@(UITouchPhaseBegan) forKey:@"_phase"];
+        [touch setValue:[NSValue valueWithCGPoint:ptInWin] forKey:@"_locationInWindow"];
+        [touch setValue:@1 forKey:@"_tapCount"];
+        [touch setValue:@(NSDate.date.timeIntervalSince1970) forKey:@"_timestamp"];
+        [touch setValue:win forKey:@"_window"];
+
+        UIView *target = [win hitTest:ptInWin withEvent:nil] ?: board;
+        [touch setValue:target forKey:@"_view"];
+
+        UIEvent *evt = [[UIEvent alloc] init];
+        [target touchesBegan:[NSSet setWithObject:touch] withEvent:evt];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [touch setValue:@(UITouchPhaseEnded) forKey:@"_phase"];
+            [target touchesEnded:[NSSet setWithObject:touch] withEvent:evt];
+        });
+    } @catch (NSException *e) {}
+}
+
+static void performAutoPlay(NSString *moveUCI, UIView *board) {
+    if (!gAutoPlay || !gEnabled || !board || !board.window) return;
+    int fromSq = 0, toSq = 0;
+    if (!parseMoveUCI(moveUCI, &fromSq, &toSq)) return;
+
+    CGPoint fromPt = squareToPoint(fromSq, board.bounds, gBoardFlipped);
+    CGPoint toPt   = squareToPoint(toSq,   board.bounds, gBoardFlipped);
+
+    double delay = gAutoPlayDelay;
+    if (gAutoPlayJitterEnabled && gAutoPlayJitterRange > 0.0) {
+        double jit = ((double)arc4random_uniform(2001) / 1000.0 - 1.0) * gAutoPlayJitterRange;
+        delay = MAX(0.1, delay + jit);
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        simulateTapOnBoard(board, fromPt);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            simulateTapOnBoard(board, toPt);
+        });
+    });
+}
+
+// Forward declaration
+static void fetchMove(NSString *fen);
+
+// --- SAFE ENGINE DISPATCHER ---
+static void processFen(NSString *fen) {
+    if (!fen || ![fen isKindOfClass:[NSString class]] || fen.length < 10) return;
+
+    NSString *cleanFen = [fen stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSArray *parts = [cleanFen componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (parts.count < 2) {
+        cleanFen = [NSString stringWithFormat:@"%@ w KQkq - 0 1", cleanFen];
+    } else if (parts.count < 4) {
+        cleanFen = [NSString stringWithFormat:@"%@ - - 0 1", cleanFen];
+    }
+
+    gCurrentFen = [cleanFen copy];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        fetchMove(cleanFen);
+    });
+}
+
+static void fetchMove(NSString *fen) {
+    if (!gEnabled || !fen.length) return;
+    if ([fen isEqualToString:gLastEvalFen] && gCurrentArrows.count) return;
+
+    // Debounce: if Stockfish is currently busy searching, save as pending FEN
+    if (gFetching) {
+        gPendingFen = [fen copy];
+        return;
+    }
+
+    gLastEvalFen = [fen copy];
+    gFetching = YES;
+
+    dbg([NSString stringWithFormat:@"Engine tính toán: %@", fen]);
+
+    if (gUseMaia && MaiaAvailable()) {
+        MaiaGo([fen UTF8String], (int)gElo, (int)gElo, ^(MaiaResult res) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                gFetching = NO;
+                if (gPendingFen && ![gPendingFen isEqualToString:gLastEvalFen]) {
+                    NSString *next = [gPendingFen copy];
+                    gPendingFen = nil;
+                    fetchMove(next);
+                } else {
+                    gPendingFen = nil;
+                }
+                if (!res.ok) return;
+
+                NSString *mv = [NSString stringWithUTF8String:res.move];
+                gBestMoveStr = [mv copy];
+                gBestEvalStr = [NSString stringWithFormat:@"%.0f%%", res.winPct];
+
+                NSDictionary *arrow = @{
+                    @"move": mv,
+                    @"eval": @(res.whiteEval),
+                    @"label": gBestEvalStr,
+                    @"rank": @0
+                };
+                if (gBoardView) {
+                    drawArrows(@[arrow], gBoardView, gBoardFlipped);
+                    if (gAutoPlay && ![gLastAutoPlayed isEqualToString:fen]) {
+                        gLastAutoPlayed = [fen copy];
+                        performAutoPlay(mv, gBoardView);
+                    }
+                }
+            });
+        });
+        return;
+    }
+
+    int depth = (int)eloToDepth(gElo);
+    int multipv = (int)gArrowCount;
+
+    EngineGo([fen UTF8String], depth, (int)gElo, multipv, ^(const EngineLine *lines, int count) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gFetching = NO;
+            if (gPendingFen && ![gPendingFen isEqualToString:gLastEvalFen]) {
+                NSString *next = [gPendingFen copy];
+                gPendingFen = nil;
+                fetchMove(next);
+            } else {
+                gPendingFen = nil;
+            }
+            if (count <= 0) return;
+
+            NSMutableArray *arrows = [NSMutableArray array];
+            for (int i = 0; i < count; i++) {
+                NSString *mv = [NSString stringWithUTF8String:lines[i].move];
+                double scorePawns = lines[i].score / 100.0;
+                NSString *lbl = lines[i].isMate ?
+                    [NSString stringWithFormat:@"M%d", lines[i].score] :
+                    (gShowWinPct ? [NSString stringWithFormat:@"%.0f%%", (50.0 + 50.0 * (2.0 / (1.0 + exp(-0.00368208 * lines[i].score)) - 1.0))] :
+                     [NSString stringWithFormat:@"%+.1f", scorePawns]);
+
+                if (i == 0) {
+                    gBestMoveStr = [mv copy];
+                    gBestEvalStr = [lbl copy];
+                }
+
+                [arrows addObject:@{
+                    @"move": mv,
+                    @"eval": @(scorePawns),
+                    @"label": lbl,
+                    @"rank": @(i)
+                }];
+            }
+
+            if (gBoardView) {
+                drawArrows(arrows, gBoardView, gBoardFlipped);
+
+                // AutoPlay logic with optional 2nd best move
+                if (gAutoPlay && ![gLastAutoPlayed isEqualToString:fen] && arrows.count) {
+                    gLastAutoPlayed = [fen copy];
+                    NSString *chosenMove = arrows[0][@"move"];
+                    if (gAutoPlaySecondBest && arrows.count >= 2 && arc4random_uniform(100) < gAutoPlaySecondBestPct) {
+                        chosenMove = arrows[1][@"move"];
+                    }
+                    performAutoPlay(chosenMove, gBoardView);
+                }
+            }
+        });
+    });
+}
+
+// --- FEN RECONSTRUCTION FROM GAMESTATE ---
+static void updateOrientationFromGameState(id gs) {
+    if (!gs) return;
+    SEL userColSel = NSSelectorFromString(@"userColor");
+    if ([gs respondsToSelector:userColSel]) {
+        id uc = ((id (*)(id, SEL))objc_msgSend)(gs, userColSel);
+        if (uc) {
+            NSString *desc = [[uc description] lowercaseString];
+            if ([desc containsString:@"black"]) {
+                gBoardFlipped = YES;
+            } else if ([desc containsString:@"white"]) {
+                gBoardFlipped = NO;
+            }
+        }
+    }
+}
+
+static NSString *extractFenFromGameState(id gs) {
+    if (!gs) return nil;
+    updateOrientationFromGameState(gs);
+
+    // 1. Try gs.fen -> fenString
+    SEL fenSel = NSSelectorFromString(@"fen");
+    if ([gs respondsToSelector:fenSel]) {
+        id fenObj = ((id (*)(id, SEL))objc_msgSend)(gs, fenSel);
+        if (fenObj) {
+            SEL fenStrSel = NSSelectorFromString(@"fenString");
+            if ([fenObj respondsToSelector:fenStrSel]) {
+                NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fenStrSel);
+                if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
+                    return fs;
+                }
+            }
+        }
+    }
+
+    // 2. Try gs.setupModel -> fenNotation
+    SEL setupSel = NSSelectorFromString(@"setupModel");
+    if ([gs respondsToSelector:setupSel]) {
+        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
+        if (sm) {
+            SEL fnSel = NSSelectorFromString(@"fenNotation");
+            if ([sm respondsToSelector:fnSel]) {
+                NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
+                if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
+                    return fn;
+                }
+            }
+        }
+    }
+    return nil;
+}
+
+// --- PURE RUNTIME SWIZZLER ---
+static void SwizzleInstanceMethod(Class cls, SEL origSel, IMP newImp, IMP *origImp) {
+    if (!cls || !origSel || !newImp) return;
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    if (!origMethod) return;
+
+    if (origImp) *origImp = method_getImplementation(origMethod);
+
+    const char *types = method_getTypeEncoding(origMethod);
+    if (class_addMethod(cls, origSel, newImp, types)) {
+        Method superMethod = class_getInstanceMethod(class_getSuperclass(cls), origSel);
+        if (superMethod && origImp) *origImp = method_getImplementation(superMethod);
+    } else {
+        method_setImplementation(origMethod, newImp);
+    }
+}
+
+// --- SAFE HOOK DEFINITIONS ---
+
+typedef void (*OrigLayout)(id, SEL);
+static OrigLayout gOrig_boardLayout = NULL;
+
+static void hook_BoardLayout(UIView *self, SEL _cmd) {
+    if (gOrig_boardLayout) gOrig_boardLayout(self, _cmd);
+    gBoardView = self;
+
+    // Check game state on board layout
+    if (gLatestGameState) {
+        NSString *fen = extractFenFromGameState(gLatestGameState);
+        if (fen.length > 10 && ![fen isEqualToString:gCurrentFen]) {
+            processFen(fen);
+        }
+    }
+
+    if (gCurrentArrows.count) {
+        drawArrows(gCurrentArrows, self, gBoardFlipped);
+    }
+}
+
+typedef NSString *(*OrigFenString)(id, SEL);
+static OrigFenString gOrig_fenString = NULL;
+
+static NSString *hook_FenString(id self, SEL _cmd) {
+    NSString *res = gOrig_fenString ? gOrig_fenString(self, _cmd) : nil;
+    if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
+        processFen(res);
+    }
+    return res;
+}
+
+typedef id (*OrigGameStateFen)(id, SEL);
+static OrigGameStateFen gOrig_gameStateFen = NULL;
+
+static id hook_GameStateFen(id self, SEL _cmd) {
+    gLatestGameState = self;
+    id fenObj = gOrig_gameStateFen ? gOrig_gameStateFen(self, _cmd) : nil;
+    if (fenObj) {
+        SEL fsSel = NSSelectorFromString(@"fenString");
+        if ([fenObj respondsToSelector:fsSel]) {
+            NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fsSel);
+            if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
+                processFen(fs);
+            }
+        }
+    }
+    return fenObj;
+}
+
+typedef id (*OrigGameStateSetupModel)(id, SEL);
+static OrigGameStateSetupModel gOrig_gameStateSetupModel = NULL;
+
+static id hook_GameStateSetupModel(id self, SEL _cmd) {
+    gLatestGameState = self;
+    id sm = gOrig_gameStateSetupModel ? gOrig_gameStateSetupModel(self, _cmd) : nil;
+    if (sm) {
+        SEL fnSel = NSSelectorFromString(@"fenNotation");
+        if ([sm respondsToSelector:fnSel]) {
+            NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
+            if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
+                processFen(fn);
+            }
+        }
+    }
+    return sm;
+}
+
+typedef NSString *(*OrigFenNotation)(id, SEL);
+static OrigFenNotation gOrig_setupModelFenNotation = NULL;
+
+static NSString *hook_FenNotation(id self, SEL _cmd) {
+    NSString *res = gOrig_setupModelFenNotation ? gOrig_setupModelFenNotation(self, _cmd) : nil;
+    if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
+        processFen(res);
+    }
+    return res;
+}
+
+static void installDuolingoHooks(void) {
+    static BOOL hooksInstalled = NO;
+    if (hooksInstalled) return;
+
+    dbg(@"Cài đặt hooks an toàn cho Duolingo Chess...");
+
+    // 1. Hook DuolingoMultiplatformChessFen -> fenString
+    Class fenCls = objc_getClass("DuolingoMultiplatformChessFen");
+    if (fenCls) {
+        SwizzleInstanceMethod(fenCls, NSSelectorFromString(@"fenString"), (IMP)hook_FenString, (IMP *)&gOrig_fenString);
+        dbg(@"[HOOK THÀNH CÔNG] DuolingoMultiplatformChessFen fenString");
+    }
+
+    // 2. Hook DuolingoMultiplatformChessGameState -> fen & setupModel
+    Class gsCls = objc_getClass("DuolingoMultiplatformChessGameState");
+    if (gsCls) {
+        SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"fen"), (IMP)hook_GameStateFen, (IMP *)&gOrig_gameStateFen);
+        SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"setupModel"), (IMP)hook_GameStateSetupModel, (IMP *)&gOrig_gameStateSetupModel);
+        dbg(@"[HOOK THÀNH CÔNG] DuolingoMultiplatformChessGameState");
+    }
+
+    // 3. Hook DuolingoMultiplatformChessGameSetupModel -> fenNotation
+    Class smCls = objc_getClass("DuolingoMultiplatformChessGameSetupModel");
+    if (smCls) {
+        SwizzleInstanceMethod(smCls, NSSelectorFromString(@"fenNotation"), (IMP)hook_FenNotation, (IMP *)&gOrig_setupModelFenNotation);
+        dbg(@"[HOOK THÀNH CÔNG] DuolingoMultiplatformChessGameSetupModel fenNotation");
+    }
+
+    // 4. Hook ChessBoardView layoutSubviews
+    NSArray *boardNames = @[@"ChessBoardView", @"_TtC5Chess14ChessBoardView", @"Chess.ChessBoardView", @"StaticChessBoardView"];
+    SEL layoutSel = @selector(layoutSubviews);
+    for (NSString *name in boardNames) {
+        Class bCls = objc_getClass(name.UTF8String);
+        if (bCls) {
+            SwizzleInstanceMethod(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrig_boardLayout);
+            dbg([NSString stringWithFormat:@"[HOOK THÀNH CÔNG] layoutSubviews trên %@", name]);
+            hooksInstalled = YES;
+            break;
+        }
+    }
+}
+
+// --- RICH SETTINGS PANEL (VIETNAMESE UI) ---
+@interface DuoRichSettingsView : UIView
+- (void)populate;
 @end
 
-@interface DuoPanelHandler : NSObject
-+ (void)eloChanged:(UISlider *)slider;
-+ (void)copyFenTapped:(UIButton *)btn;
-+ (void)closeTapped:(UIButton *)btn;
-@end
-
-static void showSettingsMenu(void);
-
-@implementation DuoChessBtnHandler
-+ (void)floatBtnTapped {
-    if (gSkipNextTap) { gSkipNextTap = NO; return; }
-    // Force a scan whenever the floating button is tapped
-    performAutoBoardScan();
-    showSettingsMenu();
+@implementation DuoRichSettingsView {
+    UIScrollView *_scroll;
+    UIStackView  *_stack;
+    UILabel      *_eloValueLabel;
+    UILabel      *_eloTierLabel;
+    UILabel      *_statusLabel;
+    UILabel      *_alphaValueLabel;
+    UILabel      *_delayValueLabel;
+    UILabel      *_secondMoveValueLabel;
 }
-+ (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *btn = pan.view;
-    UIView *container = btn.superview;
-    CGPoint tr = [pan translationInView:container];
-    btn.center = CGPointMake(btn.center.x + tr.x, btn.center.y + tr.y);
-    [pan setTranslation:CGPointZero inView:container];
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if (self = [super initWithFrame:frame]) {
+        self.backgroundColor = [UIColor colorWithRed:0.10 green:0.12 blue:0.15 alpha:0.98];
+        self.layer.cornerRadius = 24;
+        self.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
+        self.layer.borderWidth = 1.0;
+        self.clipsToBounds = YES;
+
+        // Top grabber
+        UIView *grab = [[UIView alloc] initWithFrame:CGRectMake(frame.size.width / 2 - 20, 8, 40, 5)];
+        grab.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.25];
+        grab.layer.cornerRadius = 2.5;
+        [self addSubview:grab];
+
+        _scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 20, frame.size.width, frame.size.height - 20)];
+        _scroll.alwaysBounceVertical = YES;
+        [self addSubview:_scroll];
+
+        _stack = [[UIStackView alloc] init];
+        _stack.axis = UILayoutConstraintAxisVertical;
+        _stack.spacing = 14;
+        _stack.translatesAutoresizingMaskIntoConstraints = NO;
+        [_scroll addSubview:_stack];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_stack.topAnchor constraintEqualToAnchor:_scroll.topAnchor constant:10],
+            [_stack.bottomAnchor constraintEqualToAnchor:_scroll.bottomAnchor constant:-20],
+            [_stack.leadingAnchor constraintEqualToAnchor:_scroll.leadingAnchor constant:16],
+            [_stack.trailingAnchor constraintEqualToAnchor:_scroll.trailingAnchor constant:-16],
+            [_stack.widthAnchor constraintEqualToConstant:frame.size.width - 32]
+        ]];
+
+        [self populate];
+    }
+    return self;
 }
-+ (void)handleLongPress:(UILongPressGestureRecognizer *)lp {
-    if (lp.state != UIGestureRecognizerStateBegan) return;
-    gSkipNextTap = YES;
+
+// UI Helpers
+- (UILabel *)lbl:(NSString *)text size:(CGFloat)sz weight:(UIFontWeight)w color:(UIColor *)c {
+    UILabel *l = [[UILabel alloc] init];
+    l.text = text;
+    l.font = [UIFont systemFontOfSize:sz weight:w];
+    l.textColor = c;
+    l.numberOfLines = 0;
+    return l;
+}
+
+- (UIView *)sep {
+    UIView *v = [[UIView alloc] init];
+    v.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
+    [v.heightAnchor constraintEqualToConstant:1].active = YES;
+    return v;
+}
+
+- (UILabel *)sectionLabel:(NSString *)title {
+    UILabel *l = [self lbl:[title uppercaseString] size:12 weight:UIFontWeightBold color:[UIColor colorWithWhite:0.55 alpha:1.0]];
+    return l;
+}
+
+- (UIView *)group:(UIView *)content {
+    UIView *c = [[UIView alloc] init];
+    c.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.05];
+    c.layer.cornerRadius = 14;
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [content.topAnchor constraintEqualToAnchor:c.topAnchor constant:12],
+        [content.bottomAnchor constraintEqualToAnchor:c.bottomAnchor constant:-12],
+        [content.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:14],
+        [content.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-14]
+    ]];
+    return c;
+}
+
+- (UIStackView *)rowTitle:(NSString *)title control:(UIView *)ctrl {
+    UIStackView *h = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self lbl:title size:15 weight:UIFontWeightMedium color:UIColor.whiteColor], ctrl]];
+    h.axis = UILayoutConstraintAxisHorizontal;
+    h.alignment = UIStackViewAlignmentCenter;
+    h.distribution = UIStackViewDistributionEqualSpacing;
+    return h;
+}
+
+- (UISwitch *)switchOn:(BOOL)on sel:(SEL)action {
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.on = on;
+    sw.onTintColor = CH_ACCENT;
+    [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+    return sw;
+}
+
+- (UIButton *)btnWithTitle:(NSString *)title bg:(UIColor *)bg fg:(UIColor *)fg sel:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.backgroundColor = bg;
+    b.layer.cornerRadius = 12;
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:fg forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    [b.heightAnchor constraintEqualToConstant:44].active = YES;
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+- (void)populate {
+    for (UIView *v in [_stack.arrangedSubviews copy]) {
+        [_stack removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+
+    // 1. Header
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+    [closeBtn setTitleColor:[UIColor colorWithWhite:0.7 alpha:1.0] forState:UIControlStateNormal];
+    [closeBtn addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIStackView *headerRow = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self lbl:@"Trợ Thủ Cờ Vua Duolingo" size:20 weight:UIFontWeightBold color:UIColor.whiteColor], closeBtn]];
+    headerRow.axis = UILayoutConstraintAxisHorizontal;
+    headerRow.distribution = UIStackViewDistributionEqualSpacing;
+    headerRow.alignment = UIStackViewAlignmentCenter;
+    [_stack addArrangedSubview:headerRow];
+
+    UILabel *creditLbl = [self lbl:@"Phát triển bởi tn2am • Stockfish 18 NNUE & Maia" size:12 weight:UIFontWeightMedium color:CH_ACCENT];
+    [_stack addArrangedSubview:creditLbl];
+
+    // Status Card
+    NSString *statText = gCurrentFen.length > 10 ?
+        [NSString stringWithFormat:@"Đã kết nối: %@", gCurrentFen.length > 28 ? [[gCurrentFen substringToIndex:28] stringByAppendingString:@"..."] : gCurrentFen] :
+        @"Chưa nhận diện bàn cờ (hãy vào bài học/ván cờ)";
+    _statusLabel = [self lbl:statText size:12 weight:UIFontWeightRegular color:(gCurrentFen.length > 10 ? CH_ACCENT : [UIColor colorWithRed:0.95 green:0.80 blue:0.3 alpha:1.0])];
+
+    NSString *moveInfo = (gBestMoveStr.length ? [NSString stringWithFormat:@"Gợi ý: %@  (Đánh giá: %@)", gBestMoveStr, gBestEvalStr ?: @"0.0"] : @"Đang chờ nước đi...");
+    UILabel *moveLbl = [self lbl:moveInfo size:14 weight:UIFontWeightSemibold color:UIColor.whiteColor];
+
+    UIStackView *statusCol = [[UIStackView alloc] initWithArrangedSubviews:@[_statusLabel, moveLbl]];
+    statusCol.axis = UILayoutConstraintAxisVertical;
+    statusCol.spacing = 6;
+    [_stack addArrangedSubview:[self group:statusCol]];
+
+    // 2. Engine Section
+    [_stack addArrangedSubview:[self sectionLabel:@"Động Cơ Phân Tích (Engine)"]];
+
+    UISegmentedControl *engSeg = [[UISegmentedControl alloc] initWithItems:@[@"Stockfish 18", @"Maia (Tự nhiên)"]];
+    engSeg.selectedSegmentIndex = gUseMaia ? 1 : 0;
+    engSeg.selectedSegmentTintColor = CH_ACCENT;
+    [engSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.blackColor} forState:UIControlStateSelected];
+    [engSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor} forState:UIControlStateNormal];
+    [engSeg addTarget:self action:@selector(engSegChanged:) forControlEvents:UIControlEventValueChanged];
+
+    _eloValueLabel = [self lbl:[NSString stringWithFormat:@"%ld ELO", (long)gElo] size:15 weight:UIFontWeightBold color:CH_ACCENT];
+    _eloTierLabel = [self lbl:eloTierName(gElo) size:12 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.6 alpha:1.0]];
+
+    UISlider *eloSlider = [[UISlider alloc] init];
+    eloSlider.minimumValue = 400; eloSlider.maximumValue = 3000; eloSlider.value = gElo;
+    eloSlider.minimumTrackTintColor = CH_ACCENT;
+    [eloSlider addTarget:self action:@selector(eloSliding:) forControlEvents:UIControlEventValueChanged];
+
+    UIStackView *eloHeader = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self lbl:@"Độ mạnh (ELO)" size:15 weight:UIFontWeightMedium color:UIColor.whiteColor], _eloValueLabel]];
+    eloHeader.axis = UILayoutConstraintAxisHorizontal;
+    eloHeader.distribution = UIStackViewDistributionEqualSpacing;
+
+    UIStackView *engCol = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self rowTitle:@"Mô hình" control:engSeg], [self sep],
+        eloHeader, eloSlider, _eloTierLabel]];
+    engCol.axis = UILayoutConstraintAxisVertical;
+    engCol.spacing = 8;
+    [_stack addArrangedSubview:[self group:engCol]];
+
+    // 3. Display Section
+    [_stack addArrangedSubview:[self sectionLabel:@"Hiển Thị Gợi Ý (Display)"]];
+
+    UISegmentedControl *evalSeg = [[UISegmentedControl alloc] initWithItems:@[@"Điểm quân (+/-)", @"% Thắng"]];
+    evalSeg.selectedSegmentIndex = gShowWinPct ? 1 : 0;
+    evalSeg.selectedSegmentTintColor = CH_ACCENT;
+    [evalSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.blackColor} forState:UIControlStateSelected];
+    [evalSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor} forState:UIControlStateNormal];
+    [evalSeg addTarget:self action:@selector(evalSegChanged:) forControlEvents:UIControlEventValueChanged];
+
+    UISegmentedControl *arrSeg = [[UISegmentedControl alloc] initWithItems:@[@"1 mũi tên", @"2", @"3"]];
+    arrSeg.selectedSegmentIndex = MIN(2, MAX(0, (int)gArrowCount - 1));
+    arrSeg.selectedSegmentTintColor = CH_ACCENT;
+    [arrSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.blackColor} forState:UIControlStateSelected];
+    [arrSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor} forState:UIControlStateNormal];
+    [arrSeg addTarget:self action:@selector(arrSegChanged:) forControlEvents:UIControlEventValueChanged];
+
+    UISegmentedControl *thickSeg = [[UISegmentedControl alloc] initWithItems:@[@"Mảnh", @"Vừa", @"Dày"]];
+    thickSeg.selectedSegmentIndex = gArrowThick < 0.85 ? 0 : (gArrowThick > 1.2 ? 2 : 1);
+    thickSeg.selectedSegmentTintColor = CH_ACCENT;
+    [thickSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.blackColor} forState:UIControlStateSelected];
+    [thickSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor} forState:UIControlStateNormal];
+    [thickSeg addTarget:self action:@selector(thickSegChanged:) forControlEvents:UIControlEventValueChanged];
+
+    _alphaValueLabel = [self lbl:[NSString stringWithFormat:@"%d%%", (int)round(gArrowAlpha * 100)] size:15 weight:UIFontWeightSemibold color:CH_ACCENT];
+    UISlider *alphaSlider = [[UISlider alloc] init];
+    alphaSlider.minimumValue = 0.3; alphaSlider.maximumValue = 1.0; alphaSlider.value = gArrowAlpha;
+    alphaSlider.minimumTrackTintColor = CH_ACCENT;
+    [alphaSlider addTarget:self action:@selector(alphaSliding:) forControlEvents:UIControlEventValueChanged];
+
+    UIStackView *dispCol = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self rowTitle:@"Kiểu đánh giá" control:evalSeg], [self sep],
+        [self rowTitle:@"Số mũi tên" control:arrSeg], [self sep],
+        [self rowTitle:@"Độ dày mũi tên" control:thickSeg], [self sep],
+        [self rowTitle:@"Nhãn điểm trên mũi tên" control:[self switchOn:gShowEvalLabels sel:@selector(swEvalLabelsChanged:)]], [self sep],
+        [self rowTitle:@"Màu theo chất lượng nước" control:[self switchOn:gArrowEvalColor sel:@selector(swColorChanged:)]], [self sep],
+        [self rowTitle:@"Độ trong suốt" control:_alphaValueLabel], alphaSlider]];
+    dispCol.axis = UILayoutConstraintAxisVertical;
+    dispCol.spacing = 10;
+    [_stack addArrangedSubview:[self group:dispCol]];
+
+    // 4. Auto Play Section
+    [_stack addArrangedSubview:[self sectionLabel:@"Tự Động Đi Cờ (Auto Play)"]];
+
+    _delayValueLabel = [self lbl:[NSString stringWithFormat:@"%.1fs", gAutoPlayDelay] size:15 weight:UIFontWeightBold color:CH_ACCENT];
+    UISlider *delaySlider = [[UISlider alloc] init];
+    delaySlider.minimumValue = 0.1; delaySlider.maximumValue = 4.0; delaySlider.value = gAutoPlayDelay;
+    delaySlider.minimumTrackTintColor = CH_ACCENT;
+    [delaySlider addTarget:self action:@selector(delaySliding:) forControlEvents:UIControlEventValueChanged];
+
+    _secondMoveValueLabel = [self lbl:[NSString stringWithFormat:@"%ld%%", (long)gAutoPlaySecondBestPct] size:15 weight:UIFontWeightBold color:CH_ACCENT];
+    UISlider *secondMoveSlider = [[UISlider alloc] init];
+    secondMoveSlider.minimumValue = 0; secondMoveSlider.maximumValue = 40; secondMoveSlider.value = gAutoPlaySecondBestPct;
+    secondMoveSlider.minimumTrackTintColor = CH_ACCENT;
+    [secondMoveSlider addTarget:self action:@selector(secondMoveSliding:) forControlEvents:UIControlEventValueChanged];
+
+    UIStackView *apCol = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self rowTitle:@"Bật Tự Động Đi" control:[self switchOn:gAutoPlay sel:@selector(swAutoPlayChanged:)]], [self sep],
+        [self rowTitle:@"Thời gian trễ" control:_delayValueLabel], delaySlider, [self sep],
+        [self rowTitle:@"Biến thiên tự nhiên (Jitter)" control:[self switchOn:gAutoPlayJitterEnabled sel:@selector(swJitterChanged:)]], [self sep],
+        [self rowTitle:@"Tỉ lệ đi nước phụ (Tránh ban)" control:_secondMoveValueLabel], secondMoveSlider,
+        [self lbl:@"Giúp nước đi giống người thật hơn, hạn chế tối đa bị hệ thống nghi ngờ." size:11 weight:UIFontWeightRegular color:[UIColor colorWithWhite:0.55 alpha:1.0]]]];
+    apCol.axis = UILayoutConstraintAxisVertical;
+    apCol.spacing = 10;
+    [_stack addArrangedSubview:[self group:apCol]];
+
+    // 5. Actions Section
+    [_stack addArrangedSubview:[self sectionLabel:@"Thao Tác Nhanh (Controls)"]];
+
+    UIButton *toggleBtn = [self btnWithTitle:(gEnabled ? @"⏸ Tạm dừng Trợ Thủ" : @"▶ Bật lại Trợ Thủ")
+                                          bg:(gEnabled ? [UIColor colorWithRed:0.8 green:0.25 blue:0.25 alpha:1.0] : CH_ACCENT)
+                                          fg:(gEnabled ? UIColor.whiteColor : UIColor.blackColor)
+                                         sel:@selector(toggleEnabled)];
+    [_stack addArrangedSubview:toggleBtn];
+
+    UIButton *safePresetBtn = [self btnWithTitle:@"⚡ Cài đặt An Toàn (Khuyên dùng)"
+                                              bg:[UIColor colorWithWhite:0.18 alpha:1.0]
+                                              fg:CH_ACCENT
+                                             sel:@selector(applySafePreset)];
+    [_stack addArrangedSubview:safePresetBtn];
+
+    UIButton *copyFenBtn = [self btnWithTitle:@"📋 Sao chép FEN bàn cờ"
+                                           bg:[UIColor colorWithWhite:0.18 alpha:1.0]
+                                           fg:UIColor.whiteColor
+                                          sel:@selector(copyFenTapped)];
+    [_stack addArrangedSubview:copyFenBtn];
+
+    UIButton *doneBtn = [self btnWithTitle:@"Hoàn tất" bg:CH_ACCENT fg:UIColor.blackColor sel:@selector(closeTapped)];
+    [_stack addArrangedSubview:doneBtn];
+}
+
+// Action Handlers
+- (void)engSegChanged:(UISegmentedControl *)s {
+    gUseMaia = (s.selectedSegmentIndex == 1);
+    savePrefs();
+    gLastEvalFen = nil;
+    if (gCurrentFen) processFen(gCurrentFen);
+}
+
+- (void)eloSliding:(UISlider *)s {
+    gElo = (NSInteger)s.value;
+    _eloValueLabel.text = [NSString stringWithFormat:@"%ld ELO", (long)gElo];
+    _eloTierLabel.text = eloTierName(gElo);
+    savePrefs();
+}
+
+- (void)evalSegChanged:(UISegmentedControl *)s {
+    gShowWinPct = (s.selectedSegmentIndex == 1);
+    savePrefs();
+    if (gCurrentFen) processFen(gCurrentFen);
+}
+
+- (void)arrSegChanged:(UISegmentedControl *)s {
+    gArrowCount = s.selectedSegmentIndex + 1;
+    savePrefs();
+    if (gCurrentFen) processFen(gCurrentFen);
+}
+
+- (void)thickSegChanged:(UISegmentedControl *)s {
+    gArrowThick = (s.selectedSegmentIndex == 0 ? 0.7 : (s.selectedSegmentIndex == 2 ? 1.4 : 1.0));
+    savePrefs();
+    if (gCurrentArrows.count && gBoardView) drawArrows(gCurrentArrows, gBoardView, gBoardFlipped);
+}
+
+- (void)alphaSliding:(UISlider *)s {
+    gArrowAlpha = s.value;
+    _alphaValueLabel.text = [NSString stringWithFormat:@"%d%%", (int)round(s.value * 100)];
+    savePrefs();
+    if (gCurrentArrows.count && gBoardView) drawArrows(gCurrentArrows, gBoardView, gBoardFlipped);
+}
+
+- (void)swEvalLabelsChanged:(UISwitch *)s {
+    gShowEvalLabels = s.on;
+    savePrefs();
+    if (gCurrentArrows.count && gBoardView) drawArrows(gCurrentArrows, gBoardView, gBoardFlipped);
+}
+
+- (void)swColorChanged:(UISwitch *)s {
+    gArrowEvalColor = s.on;
+    savePrefs();
+    if (gCurrentArrows.count && gBoardView) drawArrows(gCurrentArrows, gBoardView, gBoardFlipped);
+}
+
+- (void)swAutoPlayChanged:(UISwitch *)s {
+    gAutoPlay = s.on;
+    savePrefs();
+    showToast(gAutoPlay ? @"▶ Đã bật Tự Động Đi Cờ" : @"⏸ Đã tắt Tự Động Đi Cờ");
+}
+
+- (void)delaySliding:(UISlider *)s {
+    gAutoPlayDelay = s.value;
+    _delayValueLabel.text = [NSString stringWithFormat:@"%.1fs", s.value];
+    savePrefs();
+}
+
+- (void)swJitterChanged:(UISwitch *)s {
+    gAutoPlayJitterEnabled = s.on;
+    savePrefs();
+}
+
+- (void)secondMoveSliding:(UISlider *)s {
+    gAutoPlaySecondBestPct = (NSInteger)s.value;
+    _secondMoveValueLabel.text = [NSString stringWithFormat:@"%ld%%", (long)gAutoPlaySecondBestPct];
+    savePrefs();
+}
+
+- (void)toggleEnabled {
     gEnabled = !gEnabled;
     savePrefs();
     if (!gEnabled) clearArrows();
-    dbg([NSString stringWithFormat:@"Trạng thái trợ thủ: %@", gEnabled ? @"BẬT" : @"TẮT"]);
+    else if (gCurrentFen) processFen(gCurrentFen);
     showToast(gEnabled ? @"▶ Đã bật Trợ Thủ Cờ Vua" : @"⏸ Đã tạm dừng Trợ Thủ");
+    [self populate];
 }
-@end
 
-@implementation DuoPanelHandler
-+ (void)eloChanged:(UISlider *)slider {
-    gElo = (NSInteger)slider.value;
-    if (gEloLabel) {
-        gEloLabel.text = [NSString stringWithFormat:@"Độ khó Engine: %ld ELO", (long)gElo];
-    }
+- (void)applySafePreset {
+    gElo = 1200;
+    gAutoPlay = YES;
+    gAutoPlayDelay = 1.0;
+    gAutoPlayJitterEnabled = YES;
+    gAutoPlayJitterRange = 0.5;
+    gAutoPlaySecondBest = YES;
+    gAutoPlaySecondBestPct = 12;
+    gArrowCount = 1;
     savePrefs();
+    showToast(@"✓ Đã áp dụng cấu hình An Toàn");
+    [self populate];
 }
-+ (void)copyFenTapped:(UIButton *)btn {
-    // Attempt force re-scan right away
-    performAutoBoardScan();
 
+- (void)copyFenTapped {
     if (gCurrentFen.length > 10) {
         [UIPasteboard generalPasteboard].string = gCurrentFen;
-        [btn setTitle:@"✓ Đã sao chép FEN!" forState:UIControlStateNormal];
-        showToast(@"📋 Đã chép FEN vào bộ nhớ tạm");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [btn setTitle:@"📋 Sao chép FEN bàn cờ" forState:UIControlStateNormal];
-        });
+        showToast(@"📋 Đã sao chép FEN vào bộ nhớ tạm");
     } else {
-        [btn setTitle:@"⏳ Đang tìm bàn cờ..." forState:UIControlStateNormal];
-        showToast(@"⚠️ Đang chờ bạn vào một ván cờ hoặc bài tập Duolingo");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [btn setTitle:@"📋 Sao chép FEN bàn cờ" forState:UIControlStateNormal];
-        });
+        showToast(@"⏳ Chưa có dữ liệu FEN bàn cờ");
     }
 }
-+ (void)closeTapped:(UIButton *)btn {
+
+- (void)closeTapped {
     if (gMenuWin) gMenuWin.hidden = YES;
 }
+
 @end
 
 static UIWindowScene *getActiveWindowScene(void) {
@@ -657,6 +1082,64 @@ static UIWindowScene *getActiveWindowScene(void) {
     }
     return nil;
 }
+
+static void showSettingsMenu(void) {
+    UIWindowScene *scene = getActiveWindowScene();
+
+    if (!gMenuWin) {
+        if (@available(iOS 13.0, *)) {
+            if (scene) gMenuWin = [[UIWindow alloc] initWithWindowScene:scene];
+        }
+        if (!gMenuWin) gMenuWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        gMenuWin.windowLevel = UIWindowLevelStatusBar + 120.0;
+        gMenuWin.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
+        gMenuWin.rootViewController = [[UIViewController alloc] init];
+    } else if (@available(iOS 13.0, *)) {
+        if (!gMenuWin.windowScene && scene) gMenuWin.windowScene = scene;
+    }
+
+    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat menuH = MIN(screenH * 0.85, 580);
+
+    [gMenuWin.rootViewController.view.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
+
+    DuoRichSettingsView *menuView = [[DuoRichSettingsView alloc] initWithFrame:CGRectMake(16, (screenH - menuH) / 2, screenW - 32, menuH)];
+    [gMenuWin.rootViewController.view addSubview:menuView];
+    gMenuWin.hidden = NO;
+    [gMenuWin makeKeyAndVisible];
+}
+
+// --- FLOATING BUTTON ---
+@interface DuoChessBtnHandler : NSObject
++ (void)floatBtnTapped;
++ (void)handlePan:(UIPanGestureRecognizer *)pan;
++ (void)handleLongPress:(UILongPressGestureRecognizer *)lp;
+@end
+
+@implementation DuoChessBtnHandler
++ (void)floatBtnTapped {
+    if (gSkipNextTap) { gSkipNextTap = NO; return; }
+    showSettingsMenu();
+}
++ (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIView *btn = pan.view;
+    UIView *container = btn.superview;
+    CGPoint tr = [pan translationInView:container];
+    btn.center = CGPointMake(btn.center.x + tr.x, btn.center.y + tr.y);
+    [pan setTranslation:CGPointZero inView:container];
+}
++ (void)handleLongPress:(UILongPressGestureRecognizer *)lp {
+    if (lp.state != UIGestureRecognizerStateBegan) return;
+    gSkipNextTap = YES;
+    gEnabled = !gEnabled;
+    savePrefs();
+    if (!gEnabled) clearArrows();
+    else if (gCurrentFen) processFen(gCurrentFen);
+    dbg([NSString stringWithFormat:@"Trạng thái trợ thủ: %@", gEnabled ? @"BẬT" : @"TẮT"]);
+    showToast(gEnabled ? @"▶ Đã bật Trợ Thủ Cờ Vua" : @"⏸ Đã tạm dừng Trợ Thủ");
+}
+@end
 
 static void setupFloatingButton(void) {
     UIWindowScene *scene = getActiveWindowScene();
@@ -686,7 +1169,7 @@ static void setupFloatingButton(void) {
         gFloatBtn.frame = CGRectMake(screenW - btnSize - 12, screenH * 0.40, btnSize, btnSize);
         gFloatBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.22 blue:0.25 alpha:0.95];
         gFloatBtn.layer.cornerRadius = 14;
-        gFloatBtn.layer.borderColor = [UIColor colorWithRed:0.35 green:0.75 blue:0.40 alpha:0.95].CGColor;
+        gFloatBtn.layer.borderColor = [CH_ACCENT CGColor];
         gFloatBtn.layer.borderWidth = 2.0;
         [gFloatBtn setTitle:@"♟" forState:UIControlStateNormal];
         gFloatBtn.titleLabel.font = [UIFont systemFontOfSize:24];
@@ -702,7 +1185,6 @@ static void setupFloatingButton(void) {
 
     gBtnWin.hidden = NO;
     [gBtnWin makeKeyAndVisible];
-    dbg(@"Đã hiển thị nút nổi ♟");
 }
 
 // Hook hitTest on UIWindow without Substrate
@@ -718,260 +1200,6 @@ static UIView *hook_WindowHitTest(UIWindow *self, SEL _cmd, CGPoint point, UIEve
     return gOrig_WindowHitTest ? gOrig_WindowHitTest(self, _cmd, point, event) : nil;
 }
 
-// --- SETTINGS PANEL (VIETNAMESE UI) ---
-static void showSettingsMenu(void) {
-    UIWindowScene *scene = getActiveWindowScene();
-
-    if (!gMenuWin) {
-        if (@available(iOS 13.0, *)) {
-            if (scene) gMenuWin = [[UIWindow alloc] initWithWindowScene:scene];
-        }
-        if (!gMenuWin) gMenuWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        gMenuWin.windowLevel = UIWindowLevelStatusBar + 120.0;
-        gMenuWin.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
-        gMenuWin.rootViewController = [[UIViewController alloc] init];
-    } else if (@available(iOS 13.0, *)) {
-        if (!gMenuWin.windowScene && scene) gMenuWin.windowScene = scene;
-    }
-
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(24, 75, [UIScreen mainScreen].bounds.size.width - 48, 410)];
-    panel.backgroundColor = [UIColor colorWithRed:0.12 green:0.15 blue:0.18 alpha:0.97];
-    panel.layer.cornerRadius = 18;
-    panel.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1].CGColor;
-    panel.layer.borderWidth = 1;
-
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 16, panel.bounds.size.width - 32, 24)];
-    title.text = @"Trợ Thủ Cờ Vua Duolingo";
-    title.textColor = [UIColor whiteColor];
-    title.font = [UIFont boldSystemFontOfSize:18];
-    [panel addSubview:title];
-
-    UILabel *credit = [[UILabel alloc] initWithFrame:CGRectMake(16, 42, panel.bounds.size.width - 32, 18)];
-    credit.text = @"Phát triển bởi tn2am • Stockfish 18 NNUE";
-    credit.textColor = CH_ACCENT;
-    credit.font = [UIFont systemFontOfSize:12];
-    [panel addSubview:credit];
-
-    // Status preview label
-    gStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 68, panel.bounds.size.width - 32, 20)];
-    if (gCurrentFen.length > 10) {
-        NSString *preview = gCurrentFen.length > 25 ? [gCurrentFen substringToIndex:25] : gCurrentFen;
-        gStatusLabel.text = [NSString stringWithFormat:@"Đã kết nối: %@...", preview];
-        gStatusLabel.textColor = CH_ACCENT;
-    } else {
-        gStatusLabel.text = @"⏳ Đang tự động quét bàn cờ...";
-        gStatusLabel.textColor = [UIColor colorWithRed:0.95 green:0.80 blue:0.3 alpha:1.0];
-    }
-    gStatusLabel.font = [UIFont systemFontOfSize:12];
-    [panel addSubview:gStatusLabel];
-
-    gEloLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 96, panel.bounds.size.width - 32, 20)];
-    gEloLabel.text = [NSString stringWithFormat:@"Độ khó Engine: %ld ELO", (long)gElo];
-    gEloLabel.textColor = [UIColor lightTextColor];
-    gEloLabel.font = [UIFont systemFontOfSize:14];
-    [panel addSubview:gEloLabel];
-
-    UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(16, 122, panel.bounds.size.width - 32, 30)];
-    slider.minimumValue = 400; slider.maximumValue = 3000; slider.value = gElo;
-    [slider addTarget:[DuoPanelHandler class] action:@selector(eloChanged:) forControlEvents:UIControlEventValueChanged];
-    [panel addSubview:slider];
-
-    UIButton *fenBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    fenBtn.frame = CGRectMake(16, 170, panel.bounds.size.width - 32, 42);
-    fenBtn.backgroundColor = [UIColor colorWithWhite:0.22 alpha:1];
-    fenBtn.layer.cornerRadius = 10;
-    [fenBtn setTitle:@"📋 Sao chép FEN bàn cờ" forState:UIControlStateNormal];
-    [fenBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    fenBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    [fenBtn addTarget:[DuoPanelHandler class] action:@selector(copyFenTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:fenBtn];
-
-    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(16, 226, panel.bounds.size.width - 32, 48)];
-    hint.text = @"Mẹo: Mũi tên xanh sẽ tự động vẽ gợi ý ngay khi bạn vào ván cờ hoặc bài tập Duolingo.";
-    hint.textColor = [UIColor colorWithWhite:0.75 alpha:1];
-    hint.font = [UIFont systemFontOfSize:12];
-    hint.numberOfLines = 3;
-    hint.textAlignment = NSTextAlignmentCenter;
-    [panel addSubview:hint];
-
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(16, 335, panel.bounds.size.width - 32, 46);
-    closeBtn.backgroundColor = CH_ACCENT;
-    closeBtn.layer.cornerRadius = 12;
-    [closeBtn setTitle:@"Hoàn tất" forState:UIControlStateNormal];
-    [closeBtn setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    [closeBtn addTarget:[DuoPanelHandler class] action:@selector(closeTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:closeBtn];
-
-    [gMenuWin.rootViewController.view.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
-    [gMenuWin.rootViewController.view addSubview:panel];
-    gMenuWin.hidden = NO;
-    [gMenuWin makeKeyAndVisible];
-}
-
-// --- PURE RUNTIME SWIZZLER (INSTANCE + CLASS METHODS) ---
-static void SwizzleInstanceMethod(Class cls, SEL origSel, IMP newImp, IMP *origImp) {
-    if (!cls || !origSel || !newImp) return;
-    Method origMethod = class_getInstanceMethod(cls, origSel);
-    if (!origMethod) return;
-
-    if (origImp) *origImp = method_getImplementation(origMethod);
-
-    const char *types = method_getTypeEncoding(origMethod);
-    if (class_addMethod(cls, origSel, newImp, types)) {
-        Method superMethod = class_getInstanceMethod(class_getSuperclass(cls), origSel);
-        if (superMethod && origImp) *origImp = method_getImplementation(superMethod);
-    } else {
-        method_setImplementation(origMethod, newImp);
-    }
-}
-
-static void SwizzleClassMethod(Class cls, SEL origSel, IMP newImp, IMP *origImp) {
-    if (!cls || !origSel || !newImp) return;
-    Class metaCls = object_getClass((id)cls);
-    if (!metaCls) return;
-    SwizzleInstanceMethod(metaCls, origSel, newImp, origImp);
-}
-
-// --- DUOLINGO HOOKS ---
-
-typedef void (*OrigLayout)(id, SEL);
-static OrigLayout gOrigBoardLayout = NULL;
-
-static void hook_BoardLayout(UIView *self, SEL _cmd) {
-    if (gOrigBoardLayout) gOrigBoardLayout(self, _cmd);
-    gBoardView = self;
-    performAutoBoardScan();
-    if (gCurrentArrows.count) {
-        drawArrows(gCurrentArrows, self, gBoardFlipped);
-    }
-}
-
-// Hook DuolingoMultiplatformChessFen -> fenString
-typedef NSString *(*OrigFenString)(id, SEL);
-static OrigFenString gOrigFenString = NULL;
-
-static NSString *hook_FenString(id self, SEL _cmd) {
-    NSString *res = gOrigFenString ? gOrigFenString(self, _cmd) : nil;
-    if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
-        dbg([NSString stringWithFormat:@"Bắt FEN từ fenString: %@", res]);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            processFen(res);
-        });
-    }
-    return res;
-}
-
-// Hook DuolingoMultiplatformChessGameState -> fen
-typedef id (*OrigGameStateFen)(id, SEL);
-static OrigGameStateFen gOrigGameStateFen = NULL;
-
-static id hook_GameStateFen(id self, SEL _cmd) {
-    gLatestGameState = self;
-    id fenObj = gOrigGameStateFen ? gOrigGameStateFen(self, _cmd) : nil;
-    if (fenObj) {
-        gLatestFenObj = fenObj;
-        SEL fsSel = NSSelectorFromString(@"fenString");
-        if ([fenObj respondsToSelector:fsSel]) {
-            NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fsSel);
-            if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    processFen(fs);
-                });
-            }
-        }
-    }
-    return fenObj;
-}
-
-// Hook DuolingoMultiplatformChessGameState -> chessBoardState
-typedef id (*OrigGameStateBoardState)(id, SEL);
-static OrigGameStateBoardState gOrigGameStateBoardState = NULL;
-
-static id hook_GameStateBoardState(id self, SEL _cmd) {
-    gLatestGameState = self;
-    id bs = gOrigGameStateBoardState ? gOrigGameStateBoardState(self, _cmd) : nil;
-    if (bs) {
-        gLatestBoardState = bs;
-        if (!gCurrentFen || gCurrentFen.length < 10) {
-            NSString *fen = extractFenFromGameState(self);
-            if (fen.length > 10) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    processFen(fen);
-                });
-            }
-        }
-    }
-    return bs;
-}
-
-// Hook DuolingoMultiplatformChessGameState -> setupModel
-typedef id (*OrigGameStateSetupModel)(id, SEL);
-static OrigGameStateSetupModel gOrigGameStateSetupModel = NULL;
-
-static id hook_GameStateSetupModel(id self, SEL _cmd) {
-    gLatestGameState = self;
-    id sm = gOrigGameStateSetupModel ? gOrigGameStateSetupModel(self, _cmd) : nil;
-    if (sm) {
-        SEL fnSel = NSSelectorFromString(@"fenNotation");
-        if ([sm respondsToSelector:fnSel]) {
-            NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
-            if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    processFen(fn);
-                });
-            }
-        }
-    }
-    return sm;
-}
-
-// Hook DuolingoMultiplatformChessGameSetupModel -> fenNotation
-typedef NSString *(*OrigFenNotation)(id, SEL);
-static OrigFenNotation gOrigFenNotation = NULL;
-
-static NSString *hook_FenNotation(id self, SEL _cmd) {
-    NSString *res = gOrigFenNotation ? gOrigFenNotation(self, _cmd) : nil;
-    if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
-        dbg([NSString stringWithFormat:@"Bắt FEN từ setupModel fenNotation: %@", res]);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            processFen(res);
-        });
-    }
-    return res;
-}
-
-// Factory hook for 1-arg FEN selectors (e.g. createForMiniMatchFenNotation:, createFenNotation:, constructFromFenFen:)
-typedef id (*OrigFactory1)(id, SEL, NSString *);
-static OrigFactory1 gOrigFactory1 = NULL;
-
-static id hook_Factory1(id self, SEL _cmd, NSString *fenNotation) {
-    id res = gOrigFactory1 ? gOrigFactory1(self, _cmd, fenNotation) : self;
-    if (fenNotation && [fenNotation isKindOfClass:[NSString class]] && fenNotation.length > 10) {
-        dbg([NSString stringWithFormat:@"Bắt FEN từ Factory: %@", fenNotation]);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            processFen(fenNotation);
-        });
-    }
-    return res;
-}
-
-// Factory hook for 2-arg FEN selectors (e.g. createFromFenFenNotation:shouldRecordAccoladeDetails:)
-typedef id (*OrigFactory2)(id, SEL, NSString *, BOOL);
-static OrigFactory2 gOrigFactory2 = NULL;
-
-static id hook_Factory2(id self, SEL _cmd, NSString *fenNotation, BOOL arg2) {
-    id res = gOrigFactory2 ? gOrigFactory2(self, _cmd, fenNotation, arg2) : self;
-    if (fenNotation && [fenNotation isKindOfClass:[NSString class]] && fenNotation.length > 10) {
-        dbg([NSString stringWithFormat:@"Bắt FEN từ Factory2: %@", fenNotation]);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            processFen(fenNotation);
-        });
-    }
-    return res;
-}
-
 // Hook UIWindow makeKeyAndVisible
 static void (*gOrig_WindowMakeKeyAndVisible)(UIWindow *, SEL) = NULL;
 static void hook_WindowMakeKeyAndVisible(UIWindow *self, SEL _cmd) {
@@ -983,115 +1211,10 @@ static void hook_WindowMakeKeyAndVisible(UIWindow *self, SEL _cmd) {
     }
 }
 
-static void installDuolingoHooks(void) {
-    static BOOL hooksInstalled = NO;
-    if (hooksInstalled) return;
-
-    dbg(@"Bắt đầu nạp hệ thống Hook tự động cho Duolingo Chess...");
-
-    // 1. Hook DuolingoMultiplatformChessFen
-    Class fenCls = objc_getClass("DuolingoMultiplatformChessFen");
-    if (fenCls) {
-        SwizzleInstanceMethod(fenCls, NSSelectorFromString(@"fenString"), (IMP)hook_FenString, (IMP *)&gOrigFenString);
-        dbg(@"ĐÃ HOOK DuolingoMultiplatformChessFen fenString");
-    }
-
-    // 2. Hook DuolingoMultiplatformChessGameState
-    Class gsCls = objc_getClass("DuolingoMultiplatformChessGameState");
-    if (gsCls) {
-        SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"fen"), (IMP)hook_GameStateFen, (IMP *)&gOrigGameStateFen);
-        SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"chessBoardState"), (IMP)hook_GameStateBoardState, (IMP *)&gOrigGameStateBoardState);
-        SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"setupModel"), (IMP)hook_GameStateSetupModel, (IMP *)&gOrigGameStateSetupModel);
-        dbg(@"ĐÃ HOOK DuolingoMultiplatformChessGameState (fen, chessBoardState, setupModel)");
-    }
-
-    // 3. Hook DuolingoMultiplatformChessGameSetupModel
-    Class smCls = objc_getClass("DuolingoMultiplatformChessGameSetupModel");
-    if (smCls) {
-        SwizzleInstanceMethod(smCls, NSSelectorFromString(@"fenNotation"), (IMP)hook_FenNotation, (IMP *)&gOrigFenNotation);
-        dbg(@"ĐÃ HOOK DuolingoMultiplatformChessGameSetupModel fenNotation");
-    }
-
-    // 4. Hook factory methods on Companion / Factory classes
-    NSArray *factorySelectors1 = @[
-        @"createForMiniMatchFenNotation:",
-        @"createForStarFromFenFenNotation:",
-        @"createFenNotation:",
-        @"constructFromFenFen:"
-    ];
-    NSArray *factorySelectors2 = @[
-        @"createFromFenFenNotation:shouldRecordAccoladeDetails:"
-    ];
-
-    // Scan loaded classes for these selectors
-    int numClasses = objc_getClassList(NULL, 0);
-    if (numClasses > 0) {
-        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-        numClasses = objc_getClassList(classes, numClasses);
-        for (int i = 0; i < numClasses; i++) {
-            Class c = classes[i];
-            const char *cName = class_getName(c);
-            if (!cName) continue;
-
-            // Target classes containing Chess or Duolingo
-            if (strstr(cName, "Chess") || strstr(cName, "Duolingo")) {
-                for (NSString *selStr in factorySelectors1) {
-                    SEL s = NSSelectorFromString(selStr);
-                    if (class_getClassMethod(c, s)) {
-                        SwizzleClassMethod(c, s, (IMP)hook_Factory1, (IMP *)&gOrigFactory1);
-                        dbg([NSString stringWithFormat:@"ĐÃ HOOK class factory %@ trên %s", selStr, cName]);
-                    }
-                    if (class_getInstanceMethod(c, s)) {
-                        SwizzleInstanceMethod(c, s, (IMP)hook_Factory1, (IMP *)&gOrigFactory1);
-                        dbg([NSString stringWithFormat:@"ĐÃ HOOK instance factory %@ trên %s", selStr, cName]);
-                    }
-                }
-                for (NSString *selStr in factorySelectors2) {
-                    SEL s = NSSelectorFromString(selStr);
-                    if (class_getClassMethod(c, s)) {
-                        SwizzleClassMethod(c, s, (IMP)hook_Factory2, (IMP *)&gOrigFactory2);
-                        dbg([NSString stringWithFormat:@"ĐÃ HOOK class factory %@ trên %s", selStr, cName]);
-                    }
-                    if (class_getInstanceMethod(c, s)) {
-                        SwizzleInstanceMethod(c, s, (IMP)hook_Factory2, (IMP *)&gOrigFactory2);
-                        dbg([NSString stringWithFormat:@"ĐÃ HOOK instance factory %@ trên %s", selStr, cName]);
-                    }
-                }
-            }
-        }
-        free(classes);
-    }
-
-    // 5. Hook ChessBoardView layoutSubviews
-    NSArray *boardNames = @[@"ChessBoardView", @"_TtC5Chess14ChessBoardView", @"Chess.ChessBoardView", @"StaticChessBoardView"];
-    SEL layoutSel = @selector(layoutSubviews);
-    for (NSString *name in boardNames) {
-        Class bCls = objc_getClass(name.UTF8String);
-        if (bCls) {
-            SwizzleInstanceMethod(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrigBoardLayout);
-            dbg([NSString stringWithFormat:@"ĐÃ HOOK layoutSubviews trên %@", name]);
-            hooksInstalled = YES;
-            break;
-        }
-    }
-
-    // 6. Start continuous automatic background poller
-    if (!gAutoPollTimer) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            gAutoPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.8
-                                                             repeats:YES
-                                                               block:^(NSTimer * _Nonnull timer) {
-                performAutoBoardScan();
-            }];
-            dbg(@"ĐÃ KHỞI CHẠY BỘ QUÉT TỰ ĐỘNG BÀN CỜ DUOLINGO (0.8s)");
-        });
-    }
-}
-
 // --- CONSTRUCTOR ---
 __attribute__((constructor)) static void initTweak(void) {
     loadPrefs();
-    dbg(@"Trợ Thủ Cờ Vua Duolingo (Tự Động • tn2am) đã nạp!");
+    dbg(@"Trợ Thủ Cờ Vua Duolingo (tn2am • Đầy Đủ Tính Năng) đã nạp!");
     EngineStart();
 
     // Hook UIWindow hitTest and makeKeyAndVisible
@@ -1108,9 +1231,9 @@ __attribute__((constructor)) static void initTweak(void) {
         installDuolingoHooks();
     }];
 
-    // Multiple delayed fail-safe attempts
-    double delays[] = { 0.5, 1.2, 2.5, 4.0, 6.0 };
-    for (int i = 0; i < 5; i++) {
+    // Delayed fail-safe attempts
+    double delays[] = { 0.5, 1.2, 2.5, 4.0 };
+    for (int i = 0; i < 4; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delays[i] * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             setupFloatingButton();
             installDuolingoHooks();
