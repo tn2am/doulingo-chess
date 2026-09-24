@@ -45,7 +45,7 @@ static BOOL      gAutoPlayJitterEnabled = YES;
 static double    gAutoPlayJitterRange  = 0.3;
 static BOOL      gAutoPlaySecondBest   = YES;
 static NSInteger gAutoPlaySecondBestPct = 10;
-static BOOL      gShowThreats          = YES; // Show opponent threat warning in red
+static BOOL      gShowThreats          = NO;  // Mac dinh tat canh bao doi thu de khong lam roi mat
 static NSInteger gFlipMode             = 0;   // 0 = Auto, 1 = Force White bottom, 2 = Force Black bottom
 
 // --- STATE VARIABLES ---
@@ -166,6 +166,11 @@ static NSInteger eloToDepth(NSInteger elo) {
     if (elo >= 1000) return 8;
     return 6;
 }
+
+// Forward declarations
+static void clearArrows(void);
+static void fetchMove(NSString *fen);
+static void processFen(NSString *fen);
 
 // Reset clean state for a new game / opponent match
 static void resetForNewGame(NSString *reason) {
@@ -291,50 +296,66 @@ static void drawArrows(NSArray *arrows, UIView *board, BOOL flipped, BOOL isThre
         int fromSq = 0, toSq = 0;
         if (!parseMoveUCI(move, &fromSq, &toSq)) continue;
 
-        // Auto-correct orientation: verify that fromSq contains a piece!
-        if (gBoard[fromSq] == ' ') {
-            flipped = !flipped;
-            gBoardFlipped = flipped;
-            dbg([NSString stringWithFormat:@"[Tự Sửa Lỗi Chiều] Đảo chiều bàn cờ vì ô %d trống!", fromSq]);
-        }
-
         CGPoint fromPt = squareToPoint(fromSq, bounds, flipped);
         CGPoint toPt   = squareToPoint(toSq,   bounds, flipped);
 
         CGFloat t = gArrowThick;
-        UIBezierPath *path = arrowPath(fromPt, toPt, sqSize * 0.45, sqSize * 0.65 * t, sqSize * 0.25 * t);
+        UIBezierPath *path = arrowPath(fromPt, toPt, sqSize * 0.42, sqSize * 0.55 * t, sqSize * 0.20 * t);
         if (!path) continue;
 
         UIColor *fillColor;
         if (isThreat) {
             fillColor = [CH_WARN colorWithAlphaComponent:gArrowAlpha];
         } else if (rank == 0) {
-            fillColor = [UIColor colorWithRed:0.25 green:0.80 blue:0.35 alpha:gArrowAlpha];
+            // Nước đi tối ưu: Xanh dạ quang Neon Chess
+            fillColor = [UIColor colorWithRed:0.0 green:0.90 blue:0.46 alpha:gArrowAlpha];
+        } else if (rank == 1) {
+            // Nước đi thứ 2: Cyan thanh lịch
+            fillColor = [UIColor colorWithRed:0.0 green:0.69 blue:1.0 alpha:gArrowAlpha * 0.9];
         } else {
-            fillColor = [UIColor colorWithRed:0.95 green:0.75 blue:0.20 alpha:gArrowAlpha * 0.75];
+            // Nước đi thứ 3: Vàng cam ấm
+            fillColor = [UIColor colorWithRed:1.0 green:0.72 blue:0.0 alpha:gArrowAlpha * 0.8];
         }
 
+        // 1. Origin Dot: Chấm tròn đánh dấu quân cờ xuất phát
+        CGFloat dotR = sqSize * 0.16;
+        UIBezierPath *dotPath = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(fromPt.x - dotR, fromPt.y - dotR, dotR * 2, dotR * 2)];
+        CAShapeLayer *dotLayer = [CAShapeLayer layer];
+        dotLayer.path = dotPath.CGPath;
+        dotLayer.fillColor = fillColor.CGColor;
+        dotLayer.strokeColor = [UIColor whiteColor].CGColor;
+        dotLayer.lineWidth = 1.2;
+        dotLayer.zPosition = 9998 - rank;
+        [board.layer addSublayer:dotLayer];
+        [gArrowLayers addObject:dotLayer];
+
+        // 2. Main Arrow Layer với hiệu ứng đổ bóng 3D
         CAShapeLayer *layer = [CAShapeLayer layer];
         layer.path = path.CGPath;
         layer.fillColor = fillColor.CGColor;
-        layer.strokeColor = [UIColor colorWithWhite:0.1 alpha:0.8].CGColor;
-        layer.lineWidth = 1.2;
+        layer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.85].CGColor;
+        layer.lineWidth = 1.0;
+        layer.shadowColor = [UIColor blackColor].CGColor;
+        layer.shadowOpacity = 0.55;
+        layer.shadowRadius = 4.0;
+        layer.shadowOffset = CGSizeMake(0, 1.5);
         layer.zPosition = 9999 - rank;
         [board.layer addSublayer:layer];
         [gArrowLayers addObject:layer];
 
+        // 3. Score / Win% Label
         NSString *label = a[@"label"];
         if (gShowEvalLabels && label.length) {
             CATextLayer *tl = [CATextLayer layer];
             tl.string = label;
-            tl.fontSize = MAX(9.0, sqSize * 0.32);
+            tl.fontSize = MAX(10.0, sqSize * 0.30);
             tl.alignmentMode = kCAAlignmentCenter;
             tl.foregroundColor = [UIColor whiteColor].CGColor;
-            tl.backgroundColor = isThreat ?
-                [[UIColor redColor] colorWithAlphaComponent:0.75].CGColor :
-                [[UIColor blackColor] colorWithAlphaComponent:0.7].CGColor;
-            tl.cornerRadius = 3;
+            tl.backgroundColor = [[UIColor colorWithRed:0.1 green:0.1 blue:0.14 alpha:0.85] CGColor];
+            tl.cornerRadius = 5.0;
             tl.masksToBounds = YES;
+            tl.borderColor = [fillColor CGColor];
+            tl.borderWidth = 1.0;
             tl.contentsScale = [UIScreen mainScreen].scale;
             CGFloat lw = sqSize * 0.85, lh = sqSize * 0.38;
             tl.frame = CGRectMake(toPt.x - lw / 2, toPt.y - lh / 2, lw, lh);
@@ -500,15 +521,15 @@ static void fetchMove(NSString *fen) {
 
     BOOL isOurTurn = (gMyColor == gTurnColor);
 
-    // If opponent's turn and threats disabled, clear arrows and wait
-    if (!isOurTurn && !gShowThreats) {
+    // Tuyệt đối không hiện nước đi của đối thủ theo yêu cầu
+    if (!isOurTurn) {
         clearArrows();
         gBestMoveStr = nil;
-        gBestEvalStr = @"Lượt đối thủ...";
+        gBestEvalStr = @"⏳ Đang chờ đối thủ đi...";
         return;
     }
 
-    dbg([NSString stringWithFormat:@"Tính toán: %@ (Lượt: %@)", fen, isOurTurn ? @"CỦA BẠN" : @"ĐỐI THỦ"]);
+    dbg([NSString stringWithFormat:@"Tính toán nước đi cho BẠN: %@", fen]);
 
     if (gUseMaia && MaiaAvailable()) {
         MaiaGo([fen UTF8String], (int)gElo, (int)gElo, ^(MaiaResult res) {
@@ -518,24 +539,8 @@ static void fetchMove(NSString *fen) {
                 NSString *mv = [NSString stringWithUTF8String:res.move];
                 gBestMoveStr = [mv copy];
                 gBestEvalStr = [NSString stringWithFormat:@"%.0f%%", res.winPct];
-
-                if (!isOurTurn) {
-                    // Opponent threat
-                    gLastWasThreat = YES;
-                    if (gBoardView && gShowThreats) {
-                        NSDictionary *arrow = @{
-                            @"move": mv,
-                            @"eval": @(res.whiteEval),
-                            @"label": @"⚠️ Cảnh báo",
-                            @"rank": @0
-                        };
-                        drawArrows(@[arrow], gBoardView, gBoardFlipped, YES);
-                    }
-                    return;
-                }
-
-                // Our turn
                 gLastWasThreat = NO;
+
                 NSDictionary *arrow = @{
                     @"move": mv,
                     @"eval": @(res.whiteEval),
@@ -555,31 +560,12 @@ static void fetchMove(NSString *fen) {
     }
 
     int depth = (int)eloToDepth(gElo);
-    int multipv = isOurTurn ? (int)gArrowCount : 1;
+    int multipv = (int)gArrowCount;
 
     EngineGo([fen UTF8String], depth, (int)gElo, multipv, ^(const EngineLine *lines, int count) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (count <= 0) return;
 
-            if (!isOurTurn) {
-                // Opponent threat warning
-                gLastWasThreat = YES;
-                NSString *mv = [NSString stringWithUTF8String:lines[0].move];
-                gBestMoveStr = [mv copy];
-                gBestEvalStr = @"⚠️ Cảnh báo đối thủ";
-                if (gBoardView && gShowThreats) {
-                    NSDictionary *arrow = @{
-                        @"move": mv,
-                        @"eval": @(lines[0].score / 100.0),
-                        @"label": @"⚠️ Cảnh báo",
-                        @"rank": @0
-                    };
-                    drawArrows(@[arrow], gBoardView, gBoardFlipped, YES);
-                }
-                return;
-            }
-
-            // Our turn
             gLastWasThreat = NO;
             NSMutableArray *arrows = [NSMutableArray array];
             for (int i = 0; i < count; i++) {
@@ -635,6 +621,20 @@ static NSInteger detectColorValue(id obj) {
             if ([ns containsString:@"white"] || [ns containsString:@"trắng"]) return 0;
         }
     }
+
+    // Kotlin Enum: ordinal 0 = WHITE, 1 = BLACK
+    SEL ordSel = NSSelectorFromString(@"ordinal");
+    if ([obj respondsToSelector:ordSel]) {
+        NSInteger ord = ((NSInteger (*)(id, SEL))objc_msgSend)(obj, ordSel);
+        if (ord == 0) return 0;
+        if (ord == 1) return 1;
+    }
+
+    SEL isWhiteSel = NSSelectorFromString(@"isWhite");
+    if ([obj respondsToSelector:isWhiteSel]) {
+        BOOL isW = ((BOOL (*)(id, SEL))objc_msgSend)(obj, isWhiteSel);
+        return isW ? 0 : 1;
+    }
     return -1;
 }
 
@@ -664,6 +664,21 @@ static void updateOrientationFromGameState(id gs) {
                         detected = detectColorValue(uc);
                         if (detected >= 0) break;
                     }
+                }
+            }
+        }
+    }
+
+    if (detected < 0) {
+        // Kiểm tra trực tiếp trên GameState xem có lượt người chơi không
+        NSArray *userTurnSels = @[@"isUserTurn", @"userTurn", @"isMyTurn", @"myTurn", @"isHumanTurn"];
+        for (NSString *tName in userTurnSels) {
+            SEL ts = NSSelectorFromString(tName);
+            if ([gs respondsToSelector:ts]) {
+                BOOL isUser = ((BOOL (*)(id, SEL))objc_msgSend)(gs, ts);
+                if (isUser && gCurrentFen.length > 10) {
+                    detected = gTurnColor;
+                    break;
                 }
             }
         }
@@ -1065,8 +1080,10 @@ static void installDuolingoHooks(void) {
         @"Chưa nhận diện bàn cờ (hãy vào bài học/ván cờ)";
     _statusLabel = [self lbl:statText size:12 weight:UIFontWeightRegular color:(gCurrentFen.length > 10 ? CH_ACCENT : [UIColor colorWithRed:0.95 green:0.80 blue:0.3 alpha:1.0])];
 
-    NSString *moveInfo = (gBestMoveStr.length ? [NSString stringWithFormat:@"%@: %@ (%@)", gLastWasThreat ? @"⚠️ Cảnh báo" : @"Gợi ý", gBestMoveStr, gBestEvalStr ?: @""] : (isOurTurn ? @"Đang tính nước cờ..." : @"Lượt đối thủ..."));
-    UILabel *moveLbl = [self lbl:moveInfo size:14 weight:UIFontWeightSemibold color:(gLastWasThreat ? CH_WARN : UIColor.whiteColor)];
+    NSString *moveInfo = isOurTurn ?
+        (gBestMoveStr.length ? [NSString stringWithFormat:@"Gợi ý: %@ (%@)", gBestMoveStr, gBestEvalStr ?: @""] : @"Đang tính nước cờ...") :
+        @"⏳ Đang chờ đối thủ đi...";
+    UILabel *moveLbl = [self lbl:moveInfo size:14 weight:UIFontWeightSemibold color:(isOurTurn ? UIColor.whiteColor : [UIColor colorWithWhite:0.65 alpha:1.0])];
 
     UISegmentedControl *colorSeg = [[UISegmentedControl alloc] initWithItems:@[@"⚪ Bạn: Quân Trắng", @"⚫ Bạn: Quân Đen"]];
     colorSeg.selectedSegmentIndex = (gMyColor == 1 ? 1 : 0);
@@ -1324,7 +1341,7 @@ static void installDuolingoHooks(void) {
     gAutoPlaySecondBest = YES;
     gAutoPlaySecondBestPct = 12;
     gArrowCount = 1;
-    gShowThreats = YES;
+    gShowThreats = NO;
     savePrefs();
     showToast(@"✓ Đã áp dụng cấu hình An Toàn");
     [self populate];
@@ -1342,7 +1359,7 @@ static void installDuolingoHooks(void) {
 - (void)applyGrandmasterPreset {
     gElo = 3000;
     gArrowCount = 1;
-    gShowThreats = YES;
+    gShowThreats = NO;
     gUseMaia = NO;
     savePrefs();
     showToast(@"👑 Đã bật Siêu Máy Tính (Stockfish 18 NNUE Max)");
