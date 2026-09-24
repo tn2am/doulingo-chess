@@ -43,7 +43,7 @@ jobs:
 
       - name: Build .deb & extract dylib
         run: |
-          make package FINALPACKAGE=1
+          make package FINALPACKAGE=1 messages=yes
           # Locate and copy the compiled .dylib directly
           find .theos/ -name "Chess.dylib" -exec cp {} ./DuolingoChess.dylib \;
           if [ ! -f ./DuolingoChess.dylib ]; then

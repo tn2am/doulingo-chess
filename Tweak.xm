@@ -41,6 +41,7 @@ static NSArray        *gCurrentArrows = nil;
 static UIWindow *gBtnWin   = nil;
 static UIButton *gFloatBtn = nil;
 static UIWindow *gMenuWin  = nil;
+static UILabel  *gEloLabel = nil;
 static BOOL      gSkipNextTap = NO;
 
 // --- LOGGING ---
@@ -96,14 +97,6 @@ static void loadPrefs(void) {
 }
 
 // --- HELPER MATH & PARSING ---
-static double evalToWinPct(double pawns, BOOL isMate, int mateIn) {
-    if (isMate) return mateIn > 0 ? 100.0 : 0.0;
-    double cp = pawns * 100.0;
-    double w = 50.0 + 50.0 * (2.0 / (1.0 + exp(-0.00368208 * cp)) - 1.0);
-    if (w < 0) w = 0; if (w > 100) w = 100;
-    return w;
-}
-
 static NSInteger eloToDepth(NSInteger elo) {
     if (elo >= 3000) return 18;
     if (elo >= 2400) return 16;
@@ -140,12 +133,12 @@ static UIBezierPath *arrowPath(CGPoint from, CGPoint to, CGFloat headLen, CGFloa
     CGFloat ux = dx / len, uy = dy / len;
     CGFloat px = -uy,      py = ux;
 
-    CGPoint shaftL1 = { from.x + px * shaftW / 2, from.y + py * shaftW / 2 };
-    CGPoint shaftR1 = { from.x - px * shaftW / 2, from.y - py * shaftW / 2 };
-    CGPoint neckL   = { to.x - ux * headLen + px * shaftW / 2, to.y - uy * headLen + py * shaftW / 2 };
-    CGPoint neckR   = { to.x - ux * headLen - px * shaftW / 2, to.y - uy * headLen - py * shaftW / 2 };
-    CGPoint wingL   = { to.x - ux * headLen + px * headW / 2,  to.y - uy * headLen + py * headW / 2 };
-    CGPoint wingR   = { to.x - ux * headLen - px * headW / 2,  to.y - uy * headLen - py * headW / 2 };
+    CGPoint shaftL1 = CGPointMake(from.x + px * shaftW / 2, from.y + py * shaftW / 2);
+    CGPoint shaftR1 = CGPointMake(from.x - px * shaftW / 2, from.y - py * shaftW / 2);
+    CGPoint neckL   = CGPointMake(to.x - ux * headLen + px * shaftW / 2, to.y - uy * headLen + py * shaftW / 2);
+    CGPoint neckR   = CGPointMake(to.x - ux * headLen - px * shaftW / 2, to.y - uy * headLen - py * shaftW / 2);
+    CGPoint wingL   = CGPointMake(to.x - ux * headLen + px * headW / 2,  to.y - uy * headLen + py * headW / 2);
+    CGPoint wingR   = CGPointMake(to.x - ux * headLen - px * headW / 2,  to.y - uy * headLen - py * headW / 2);
 
     UIBezierPath *path = [UIBezierPath bezierPath];
     [path moveToPoint:shaftL1];
@@ -178,7 +171,6 @@ static void drawArrows(NSArray *arrows, UIView *board, BOOL flipped) {
 
     for (NSDictionary *a in arrows) {
         NSString *move = a[@"move"];
-        double evalUs = [a[@"eval"] doubleValue];
         int rank = [a[@"rank"] intValue];
 
         int fromSq = 0, toSq = 0;
@@ -286,6 +278,12 @@ static void processFen(NSString *fen) {
 + (void)handleLongPress:(UILongPressGestureRecognizer *)lp;
 @end
 
+@interface DuoPanelHandler : NSObject
++ (void)eloChanged:(UISlider *)slider;
++ (void)copyFenTapped:(UIButton *)btn;
++ (void)closeTapped:(UIButton *)btn;
+@end
+
 static void showSettingsMenu(void);
 
 @implementation DuoChessBtnHandler
@@ -295,9 +293,10 @@ static void showSettingsMenu(void);
 }
 + (void)handlePan:(UIPanGestureRecognizer *)pan {
     UIView *btn = pan.view;
-    CGPoint tr = [pan translationInView:btn.superview];
+    UIView *container = btn.superview;
+    CGPoint tr = [pan translationInView:container];
     btn.center = CGPointMake(btn.center.x + tr.x, btn.center.y + tr.y);
-    [pan setTranslation:CGPointZero inView:btn.superview];
+    [pan setTranslation:CGPointZero inView:container];
 }
 + (void)handleLongPress:(UILongPressGestureRecognizer *)lp {
     if (lp.state != UIGestureRecognizerStateBegan) return;
@@ -306,6 +305,28 @@ static void showSettingsMenu(void);
     savePrefs();
     if (!gEnabled) clearArrows();
     dbg([NSString stringWithFormat:@"Toggled Assistant: %@", gEnabled ? @"ON" : @"OFF"]);
+}
+@end
+
+@implementation DuoPanelHandler
++ (void)eloChanged:(UISlider *)slider {
+    gElo = (NSInteger)slider.value;
+    if (gEloLabel) {
+        gEloLabel.text = [NSString stringWithFormat:@"Engine ELO: %ld", (long)gElo];
+    }
+    savePrefs();
+}
++ (void)copyFenTapped:(UIButton *)btn {
+    if (gCurrentFen.length) {
+        [UIPasteboard generalPasteboard].string = gCurrentFen;
+        [btn setTitle:@"Copied!" forState:UIControlStateNormal];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [btn setTitle:@"Copy Current FEN" forState:UIControlStateNormal];
+        });
+    }
+}
++ (void)closeTapped:(UIButton *)btn {
+    if (gMenuWin) gMenuWin.hidden = YES;
 }
 @end
 
@@ -373,19 +394,15 @@ static void showSettingsMenu(void) {
     title.font = [UIFont boldSystemFontOfSize:17];
     [panel addSubview:title];
 
-    UILabel *eloLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 56, 200, 20)];
-    eloLbl.text = [NSString stringWithFormat:@"Engine ELO: %ld", (long)gElo];
-    eloLbl.textColor = [UIColor lightTextColor];
-    eloLbl.font = [UIFont systemFontOfSize:14];
-    [panel addSubview:eloLbl];
+    gEloLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 56, 200, 20)];
+    gEloLabel.text = [NSString stringWithFormat:@"Engine ELO: %ld", (long)gElo];
+    gEloLabel.textColor = [UIColor lightTextColor];
+    gEloLabel.font = [UIFont systemFontOfSize:14];
+    [panel addSubview:gEloLabel];
 
     UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(16, 80, panel.bounds.size.width - 32, 30)];
     slider.minimumValue = 400; slider.maximumValue = 3000; slider.value = gElo;
-    [slider addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-        gElo = (NSInteger)slider.value;
-        eloLbl.text = [NSString stringWithFormat:@"Engine ELO: %ld", (long)gElo];
-        savePrefs();
-    }] forControlEvents:UIControlEventValueChanged];
+    [slider addTarget:[DuoPanelHandler class] action:@selector(eloChanged:) forControlEvents:UIControlEventValueChanged];
     [panel addSubview:slider];
 
     UIButton *fenBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -394,15 +411,7 @@ static void showSettingsMenu(void) {
     fenBtn.layer.cornerRadius = 8;
     [fenBtn setTitle:@"Copy Current FEN" forState:UIControlStateNormal];
     [fenBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [fenBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-        if (gCurrentFen.length) {
-            [UIPasteboard generalPasteboard].string = gCurrentFen;
-            [fenBtn setTitle:@"Copied!" forState:UIControlStateNormal];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [fenBtn setTitle:@"Copy Current FEN" forState:UIControlStateNormal];
-            });
-        }
-    }] forControlEvents:UIControlEventTouchUpInside];
+    [fenBtn addTarget:[DuoPanelHandler class] action:@selector(copyFenTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:fenBtn];
 
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -412,9 +421,7 @@ static void showSettingsMenu(void) {
     [closeBtn setTitle:@"Done" forState:UIControlStateNormal];
     [closeBtn setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
     closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    [closeBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-        gMenuWin.hidden = YES;
-    }] forControlEvents:UIControlEventTouchUpInside];
+    [closeBtn addTarget:[DuoPanelHandler class] action:@selector(closeTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:closeBtn];
 
     [gMenuWin.rootViewController.view.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
@@ -425,10 +432,22 @@ static void showSettingsMenu(void) {
 
 // --- DUOLINGO HOOKS ---
 
-// 1. Hooking DuolingoMultiplatformChessFen (KMM)
-static id (*gOrig_FenInit)(id, SEL, NSString *) = NULL;
+typedef void (*OrigLayout)(id, SEL);
+static OrigLayout gOrigBoardLayout = NULL;
+
+static void hook_BoardLayout(UIView *self, SEL _cmd) {
+    if (gOrigBoardLayout) gOrigBoardLayout(self, _cmd);
+    gBoardView = self;
+    if (gCurrentArrows.count) {
+        drawArrows(gCurrentArrows, self, gBoardFlipped);
+    }
+}
+
+typedef id (*OrigFenInit)(id, SEL, NSString *);
+static OrigFenInit gOrigFenInit = NULL;
+
 static id hook_FenInit(id self, SEL _cmd, NSString *fenNotation) {
-    id res = gOrig_FenInit(self, _cmd, fenNotation);
+    id res = gOrigFenInit ? gOrigFenInit(self, _cmd, fenNotation) : self;
     if (fenNotation && [fenNotation isKindOfClass:[NSString class]] && fenNotation.length > 10) {
         dbg([NSString stringWithFormat:@"Captured FEN from init: %@", fenNotation]);
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -438,36 +457,30 @@ static id hook_FenInit(id self, SEL _cmd, NSString *fenNotation) {
     return res;
 }
 
-// 2. Hooking ChessBoardView (Swift: _TtC5Chess14ChessBoardView / Chess.ChessBoardView)
-static void (*gOrig_BoardLayout)(UIView *, SEL) = NULL;
-static void hook_BoardLayout(UIView *self, SEL _cmd) {
-    if (gOrig_BoardLayout) gOrig_BoardLayout(self, _cmd);
-    gBoardView = self;
-    if (gCurrentArrows.count) {
-        drawArrows(gCurrentArrows, self, gBoardFlipped);
-    }
-}
-
 static void installDuolingoHooks(void) {
-    // Hook DuolingoMultiplatformChessFen
+    static BOOL hooksInstalled = NO;
+    if (hooksInstalled) return;
+
+    // 1. Hook DuolingoMultiplatformChessFen
     Class fenCls = objc_getClass("DuolingoMultiplatformChessFen");
     if (fenCls) {
         SEL initSel = NSSelectorFromString(@"initWithFenNotation:");
         Method m = class_getInstanceMethod(fenCls, initSel);
         if (m) {
-            MSHookMessageEx(fenCls, initSel, (IMP)hook_FenInit, (IMP *)&gOrig_FenInit);
+            MSHookMessageEx(fenCls, initSel, (IMP)hook_FenInit, (IMP *)&gOrigFenInit);
             dbg(@"HOOKED DuolingoMultiplatformChessFen initWithFenNotation:");
         }
     }
 
-    // Hook ChessBoardView
+    // 2. Hook ChessBoardView layoutSubviews
     NSArray *boardNames = @[@"ChessBoardView", @"_TtC5Chess14ChessBoardView", @"Chess.ChessBoardView", @"StaticChessBoardView"];
     SEL layoutSel = @selector(layoutSubviews);
     for (NSString *name in boardNames) {
         Class bCls = objc_getClass(name.UTF8String);
         if (bCls) {
-            MSHookMessageEx(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrig_BoardLayout);
+            MSHookMessageEx(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrigBoardLayout);
             dbg([NSString stringWithFormat:@"HOOKED layoutSubviews on %@", name]);
+            hooksInstalled = YES;
             break;
         }
     }
