@@ -9,7 +9,7 @@ TWEAK_NAME = Chess
 
 Chess_FILES      = Tweak.xm engine.mm maia.mm
 Chess_FRAMEWORKS = UIKit Foundation QuartzCore CoreML
-Chess_CFLAGS     = -fobjc-arc -Wno-deprecated-declarations -Isf/src -std=c++17
+Chess_CFLAGS     = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Isf/src -std=c++17
 Chess_LDFLAGS    = -Lsf/src -lstockfish -lc++
 
 include $(THEOS)/makefiles/tweak.mk

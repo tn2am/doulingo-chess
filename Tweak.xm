@@ -51,9 +51,7 @@ static NSInteger gFlipMode             = 0;   // 0 = Auto, 1 = Force White botto
 // --- STATE VARIABLES ---
 static NSString *gCurrentFen     = nil;
 static NSString *gLastEvalFen    = nil;
-static NSString *gPendingFen     = nil;
 static NSString *gLastAutoPlayed = nil;
-static BOOL      gFetching       = NO;
 static __weak UIView *gBoardView = nil;
 
 // Board orientation & Player color (0 = White, 1 = Black)
