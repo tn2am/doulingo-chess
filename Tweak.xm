@@ -157,13 +157,26 @@ static NSString *eloTierName(NSInteger elo) {
     return @"Đại kiện tướng (GM)";
 }
 
-// Optimized depth mapping for instant mobile calculation (< 100ms)
+// Depth mapping for high-intelligence Grandmaster analysis
 static NSInteger eloToDepth(NSInteger elo) {
-    if (elo >= 2400) return 10;
-    if (elo >= 1800) return 9;
-    if (elo >= 1400) return 8;
-    if (elo >= 1000) return 7;
+    if (elo >= 2600) return 16;
+    if (elo >= 2200) return 14;
+    if (elo >= 1800) return 12;
+    if (elo >= 1400) return 10;
+    if (elo >= 1000) return 8;
     return 6;
+}
+
+// Reset clean state for a new game / opponent match
+static void resetForNewGame(NSString *reason) {
+    dbg([NSString stringWithFormat:@"[VÁN MỚI] %@ -> Đặt lại toàn bộ dữ liệu bàn cờ.", reason]);
+    gCurrentFen = nil;
+    gLastEvalFen = nil;
+    gLastAutoPlayed = nil;
+    gBestMoveStr = nil;
+    gBestEvalStr = nil;
+    gLastWasThreat = NO;
+    clearArrows();
 }
 
 // --- FEN PARSER ---
@@ -607,20 +620,57 @@ static void fetchMove(NSString *fen) {
     });
 }
 
-// Update orientation from userColor
+static NSInteger detectColorValue(id obj) {
+    if (!obj) return -1;
+    NSString *desc = [[obj description] lowercaseString];
+    if ([desc containsString:@"black"] || [desc containsString:@"đen"]) return 1;
+    if ([desc containsString:@"white"] || [desc containsString:@"trắng"]) return 0;
+
+    SEL nameSel = NSSelectorFromString(@"name");
+    if ([obj respondsToSelector:nameSel]) {
+        id n = ((id (*)(id, SEL))objc_msgSend)(obj, nameSel);
+        if (n && [n isKindOfClass:[NSString class]]) {
+            NSString *ns = [((NSString *)n) lowercaseString];
+            if ([ns containsString:@"black"] || [ns containsString:@"đen"]) return 1;
+            if ([ns containsString:@"white"] || [ns containsString:@"trắng"]) return 0;
+        }
+    }
+    return -1;
+}
+
+// Update orientation & player color from userColor
 static void updateOrientationFromGameState(id gs) {
     if (!gs) return;
-    SEL userColSel = NSSelectorFromString(@"userColor");
-    if ([gs respondsToSelector:userColSel]) {
-        id uc = ((id (*)(id, SEL))objc_msgSend)(gs, userColSel);
-        if (uc) {
-            NSString *desc = [[uc description] lowercaseString];
-            if ([desc containsString:@"black"]) {
-                gMyColor = 1;
-            } else if ([desc containsString:@"white"]) {
-                gMyColor = 0;
+    NSInteger detected = -1;
+    NSArray *colorSelectors = @[@"userColor", @"playerColor", @"myColor", @"humanColor", @"side"];
+    for (NSString *sName in colorSelectors) {
+        SEL s = NSSelectorFromString(sName);
+        if ([gs respondsToSelector:s]) {
+            id uc = ((id (*)(id, SEL))objc_msgSend)(gs, s);
+            detected = detectColorValue(uc);
+            if (detected >= 0) break;
+        }
+    }
+
+    if (detected < 0) {
+        SEL smSel = NSSelectorFromString(@"setupModel");
+        if ([gs respondsToSelector:smSel]) {
+            id sm = ((id (*)(id, SEL))objc_msgSend)(gs, smSel);
+            if (sm) {
+                for (NSString *sName in colorSelectors) {
+                    SEL s = NSSelectorFromString(sName);
+                    if ([sm respondsToSelector:s]) {
+                        id uc = ((id (*)(id, SEL))objc_msgSend)(sm, s);
+                        detected = detectColorValue(uc);
+                        if (detected >= 0) break;
+                    }
+                }
             }
         }
+    }
+
+    if (detected >= 0) {
+        gMyColor = detected;
     }
 
     if (gFlipMode == 1) {
@@ -693,12 +743,8 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
 
     // New board detection: reset previous game state
     if (self != gBoardView) {
-        dbg(@"[TỰ ĐỘNG] Phát hiện bàn cờ mới! Thiết lập lại trận đấu.");
         gBoardView = self;
-        gCurrentFen = nil;
-        gLastEvalFen = nil;
-        gLastAutoPlayed = nil;
-        clearArrows();
+        resetForNewGame(@"Phát hiện bàn cờ mới từ giao diện");
     }
 
     if (gLatestGameState) {
@@ -710,6 +756,51 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
 
     if (gCurrentArrows.count) {
         drawArrows(gCurrentArrows, self, gBoardFlipped, gLastWasThreat);
+    }
+}
+
+// Adaptive color detection: when player touches a piece, detect their color automatically
+typedef void (*OrigTouchesBegan)(UIView *, SEL, NSSet *, UIEvent *);
+static OrigTouchesBegan gOrig_boardTouchesBegan = NULL;
+
+static void hook_BoardTouchesBegan(UIView *self, SEL _cmd, NSSet *touches, UIEvent *event) {
+    if (gOrig_boardTouchesBegan) gOrig_boardTouchesBegan(self, _cmd, touches, event);
+
+    UITouch *t = [touches anyObject];
+    if (t && self.bounds.size.width > 0) {
+        CGPoint pt = [t locationInView:self];
+        CGFloat minDim = MIN(self.bounds.size.width, self.bounds.size.height);
+        CGFloat offsetX = (self.bounds.size.width - minDim) / 2.0;
+        CGFloat offsetY = (self.bounds.size.height - minDim) / 2.0;
+        CGFloat s = minDim / 8.0;
+
+        int col = (int)((pt.x - offsetX) / s);
+        int row = (int)((pt.y - offsetY) / s);
+        if (col >= 0 && col < 8 && row >= 0 && row < 8) {
+            int file = gBoardFlipped ? (7 - col) : col;
+            int rank = gBoardFlipped ? row : (7 - row);
+            int sq = rank * 8 + file;
+            if (sq >= 0 && sq < 64) {
+                char p = gBoard[sq];
+                if (p >= 'A' && p <= 'Z') {
+                    if (gMyColor != 0) {
+                        dbg(@"[TỰ ĐỘNG CHUYỂN MÀU] Chạm quân Trắng -> Bạn là TRẮNG ⚪");
+                        gMyColor = 0;
+                        if (gFlipMode == 0) gBoardFlipped = NO;
+                        savePrefs();
+                        if (gCurrentFen) processFen(gCurrentFen);
+                    }
+                } else if (p >= 'a' && p <= 'z') {
+                    if (gMyColor != 1) {
+                        dbg(@"[TỰ ĐỘNG CHUYỂN MÀU] Chạm quân Đen -> Bạn là ĐEN ⚫");
+                        gMyColor = 1;
+                        if (gFlipMode == 0) gBoardFlipped = YES;
+                        savePrefs();
+                        if (gCurrentFen) processFen(gCurrentFen);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -728,7 +819,12 @@ typedef id (*OrigGameStateFen)(id, SEL);
 static OrigGameStateFen gOrig_gameStateFen = NULL;
 
 static id hook_GameStateFen(id self, SEL _cmd) {
-    gLatestGameState = self;
+    if (self != gLatestGameState) {
+        gLatestGameState = self;
+        resetForNewGame(@"Phát hiện GameState mới");
+    }
+    updateOrientationFromGameState(self);
+
     id fenObj = gOrig_gameStateFen ? gOrig_gameStateFen(self, _cmd) : nil;
     if (fenObj) {
         SEL fsSel = NSSelectorFromString(@"fenString");
@@ -746,7 +842,12 @@ typedef id (*OrigGameStateSetupModel)(id, SEL);
 static OrigGameStateSetupModel gOrig_gameStateSetupModel = NULL;
 
 static id hook_GameStateSetupModel(id self, SEL _cmd) {
-    gLatestGameState = self;
+    if (self != gLatestGameState) {
+        gLatestGameState = self;
+        resetForNewGame(@"Phát hiện GameState mới từ setupModel");
+    }
+    updateOrientationFromGameState(self);
+
     id sm = gOrig_gameStateSetupModel ? gOrig_gameStateSetupModel(self, _cmd) : nil;
     if (sm) {
         SEL fnSel = NSSelectorFromString(@"fenNotation");
@@ -795,10 +896,12 @@ static void installDuolingoHooks(void) {
 
     NSArray *boardNames = @[@"ChessBoardView", @"_TtC5Chess14ChessBoardView", @"Chess.ChessBoardView", @"StaticChessBoardView"];
     SEL layoutSel = @selector(layoutSubviews);
+    SEL touchSel = @selector(touchesBegan:withEvent:);
     for (NSString *name in boardNames) {
         Class bCls = objc_getClass(name.UTF8String);
         if (bCls) {
             SwizzleInstanceMethod(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrig_boardLayout);
+            SwizzleInstanceMethod(bCls, touchSel, (IMP)hook_BoardTouchesBegan, (IMP *)&gOrig_boardTouchesBegan);
             hooksInstalled = YES;
             break;
         }
@@ -956,18 +1059,25 @@ static void installDuolingoHooks(void) {
 
     // Status Card
     BOOL isOurTurn = (gMyColor == gTurnColor);
-    NSString *turnText = (gMyColor == 0 ? @"Bạn: Trắng" : @"Bạn: Đen");
+    NSString *turnText = (gMyColor == 0 ? @"Bạn: Trắng ⚪" : @"Bạn: Đen ⚫");
     NSString *statText = gCurrentFen.length > 10 ?
-        [NSString stringWithFormat:@"Đã kết nối (%@ - Lượt: %@)", turnText, isOurTurn ? @"Bạn" : @"Đối thủ"] :
+        [NSString stringWithFormat:@"Đã kết nối (%@ - Lượt: %@)", turnText, isOurTurn ? @"CỦA BẠN" : @"ĐỐI THỦ"] :
         @"Chưa nhận diện bàn cờ (hãy vào bài học/ván cờ)";
     _statusLabel = [self lbl:statText size:12 weight:UIFontWeightRegular color:(gCurrentFen.length > 10 ? CH_ACCENT : [UIColor colorWithRed:0.95 green:0.80 blue:0.3 alpha:1.0])];
 
-    NSString *moveInfo = (gBestMoveStr.length ? [NSString stringWithFormat:@"%@: %@ (%@)", gLastWasThreat ? @"⚠️ Cảnh báo" : @"Gợi ý", gBestMoveStr, gBestEvalStr ?: @""] : @"Đang chờ nước đi...");
+    NSString *moveInfo = (gBestMoveStr.length ? [NSString stringWithFormat:@"%@: %@ (%@)", gLastWasThreat ? @"⚠️ Cảnh báo" : @"Gợi ý", gBestMoveStr, gBestEvalStr ?: @""] : (isOurTurn ? @"Đang tính nước cờ..." : @"Lượt đối thủ..."));
     UILabel *moveLbl = [self lbl:moveInfo size:14 weight:UIFontWeightSemibold color:(gLastWasThreat ? CH_WARN : UIColor.whiteColor)];
 
-    UIStackView *statusCol = [[UIStackView alloc] initWithArrangedSubviews:@[_statusLabel, moveLbl]];
+    UISegmentedControl *colorSeg = [[UISegmentedControl alloc] initWithItems:@[@"⚪ Bạn: Quân Trắng", @"⚫ Bạn: Quân Đen"]];
+    colorSeg.selectedSegmentIndex = (gMyColor == 1 ? 1 : 0);
+    colorSeg.selectedSegmentTintColor = (gMyColor == 1 ? [UIColor colorWithRed:0.22 green:0.25 blue:0.30 alpha:1.0] : UIColor.whiteColor);
+    [colorSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: (gMyColor == 1 ? UIColor.whiteColor : UIColor.blackColor)} forState:UIControlStateSelected];
+    [colorSeg setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:0.75 alpha:1.0]} forState:UIControlStateNormal];
+    [colorSeg addTarget:self action:@selector(colorSegChanged:) forControlEvents:UIControlEventValueChanged];
+
+    UIStackView *statusCol = [[UIStackView alloc] initWithArrangedSubviews:@[_statusLabel, moveLbl, [self sep], colorSeg]];
     statusCol.axis = UILayoutConstraintAxisVertical;
-    statusCol.spacing = 6;
+    statusCol.spacing = 8;
     [_stack addArrangedSubview:[self group:statusCol]];
 
     // 1. Engine Section
@@ -1077,17 +1187,29 @@ static void installDuolingoHooks(void) {
     // 4. Actions Section
     [_stack addArrangedSubview:[self sectionLabel:@"Thao Tác Nhanh (Controls)"]];
 
+    UIButton *gmPresetBtn = [self btnWithTitle:@"👑 Siêu Máy Tính (3500 ELO - Bất Bại)"
+                                            bg:[UIColor colorWithRed:0.25 green:0.18 blue:0.40 alpha:1.0]
+                                            fg:[UIColor colorWithRed:0.85 green:0.65 blue:1.0 alpha:1.0]
+                                           sel:@selector(applyGrandmasterPreset)];
+    [_stack addArrangedSubview:gmPresetBtn];
+
+    UIButton *safePresetBtn = [self btnWithTitle:@"🛡️ Cài đặt An Toàn (Mô phỏng người thật)"
+                                              bg:[UIColor colorWithWhite:0.18 alpha:1.0]
+                                              fg:CH_ACCENT
+                                             sel:@selector(applySafePreset)];
+    [_stack addArrangedSubview:safePresetBtn];
+
+    UIButton *resetMatchBtn = [self btnWithTitle:@"🔄 Nhận diện lại bàn cờ mới"
+                                              bg:[UIColor colorWithWhite:0.18 alpha:1.0]
+                                              fg:[UIColor colorWithRed:0.40 green:0.80 blue:1.0 alpha:1.0]
+                                             sel:@selector(manualResetMatch)];
+    [_stack addArrangedSubview:resetMatchBtn];
+
     UIButton *toggleBtn = [self btnWithTitle:(gEnabled ? @"⏸ Tạm dừng Trợ Thủ" : @"▶ Bật lại Trợ Thủ")
                                           bg:(gEnabled ? [UIColor colorWithRed:0.8 green:0.25 blue:0.25 alpha:1.0] : CH_ACCENT)
                                           fg:(gEnabled ? UIColor.whiteColor : UIColor.blackColor)
                                          sel:@selector(toggleEnabled)];
     [_stack addArrangedSubview:toggleBtn];
-
-    UIButton *safePresetBtn = [self btnWithTitle:@"⚡ Cài đặt An Toàn (Khuyên dùng)"
-                                              bg:[UIColor colorWithWhite:0.18 alpha:1.0]
-                                              fg:CH_ACCENT
-                                             sel:@selector(applySafePreset)];
-    [_stack addArrangedSubview:safePresetBtn];
 
     UIButton *copyFenBtn = [self btnWithTitle:@"📋 Sao chép FEN bàn cờ"
                                            bg:[UIColor colorWithWhite:0.18 alpha:1.0]
@@ -1205,6 +1327,37 @@ static void installDuolingoHooks(void) {
     gShowThreats = YES;
     savePrefs();
     showToast(@"✓ Đã áp dụng cấu hình An Toàn");
+    [self populate];
+}
+
+- (void)colorSegChanged:(UISegmentedControl *)s {
+    gMyColor = s.selectedSegmentIndex;
+    if (gFlipMode == 0) gBoardFlipped = (gMyColor == 1);
+    savePrefs();
+    showToast(gMyColor == 0 ? @"⚪ Đã chọn: Bạn là quân Trắng (Đi trước)" : @"⚫ Đã chọn: Bạn là quân Đen (Đi sau)");
+    if (gCurrentFen) processFen(gCurrentFen);
+    [self populate];
+}
+
+- (void)applyGrandmasterPreset {
+    gElo = 3000;
+    gArrowCount = 1;
+    gShowThreats = YES;
+    gUseMaia = NO;
+    savePrefs();
+    showToast(@"👑 Đã bật Siêu Máy Tính (Stockfish 18 NNUE Max)");
+    [self populate];
+    if (gCurrentFen) processFen(gCurrentFen);
+}
+
+- (void)manualResetMatch {
+    resetForNewGame(@"Người dùng bấm làm mới ván cờ");
+    showToast(@"🔄 Đã làm mới! Đang nhận diện lại bàn cờ...");
+    if (gLatestGameState) {
+        updateOrientationFromGameState(gLatestGameState);
+        NSString *fen = extractFenFromGameState(gLatestGameState);
+        if (fen) processFen(fen);
+    }
     [self populate];
 }
 

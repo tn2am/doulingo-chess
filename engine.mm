@@ -106,15 +106,18 @@ void resetCands() {
 void applyOptions(int elo, int multipv) {
     if (elo != gCurElo) {
         gCurElo = elo;
-        if (elo >= 3190) {
+        if (elo >= 1800) {
+            // Sức mạnh tối đa của Stockfish 18 NNUE (Grandmaster / Siêu máy tính)
             gIn.push("setoption name UCI_LimitStrength value false\n");
             gIn.push("setoption name Skill Level value 20\n");
-        } else if (elo >= 1320) {
+        } else if (elo >= 1200) {
+            // Mức độ trung cấp - cao cấp
             gIn.push("setoption name Skill Level value 20\n");
             gIn.push("setoption name UCI_LimitStrength value true\n");
             gIn.push(std::string("setoption name UCI_Elo value ") + std::to_string(elo) + "\n");
         } else {
-            int skill = (elo - 400) * 8 / 919;
+            // Mức độ tập sự
+            int skill = (elo - 400) * 8 / 800;
             if (skill < 0) skill = 0; if (skill > 8) skill = 8;
             gIn.push("setoption name UCI_LimitStrength value false\n");
             gIn.push(std::string("setoption name Skill Level value ") + std::to_string(skill) + "\n");
@@ -227,6 +230,8 @@ extern "C" void EngineStart(void) {
     static std::once_flag once;
     std::call_once(once, [] {
         std::thread(engineThread).detach();
+        gIn.push("setoption name Hash value 32\n");
+        gIn.push("setoption name Threads value 2\n");
     });
 }
 
