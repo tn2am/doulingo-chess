@@ -56,6 +56,15 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
+      - name: Upload Build Log on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-log
+          path: |
+            *.log
+            .theos/
+
       - name: Upload Dylib Artifact
         uses: actions/upload-artifact@v4
         with:

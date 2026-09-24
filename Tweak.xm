@@ -1,10 +1,19 @@
 #import <UIKit/UIKit.h>
+#import <UIKit/UIGestureRecognizerSubclass.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
+#import <math.h>
 #import "engine.h"
 #import "maia.h"
+
+@interface UIGestureRecognizer (TouchEmulation)
+- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event;
+- (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event;
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event;
+- (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event;
+@end
 
 #define CH_ACCENT [UIColor colorWithRed:0.35 green:0.75 blue:0.40 alpha:1.0]
 #define CH_WARN   [UIColor colorWithRed:0.95 green:0.30 blue:0.30 alpha:1.0]
@@ -391,7 +400,9 @@ static void chFakeTouchFire(CGPoint ptInWin, UIWindow *win, UITouchPhase phase) 
                 [target touchesBegan:touches withEvent:sCarrierEvent];
                 for (UIView *v = target; v; v = v.superview) {
                     for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled) [g touchesBegan:touches withEvent:sCarrierEvent];
+                        if (g.isEnabled && [g respondsToSelector:@selector(touchesBegan:withEvent:)]) {
+                            [g touchesBegan:touches withEvent:sCarrierEvent];
+                        }
                     }
                 }
                 break;
@@ -399,7 +410,9 @@ static void chFakeTouchFire(CGPoint ptInWin, UIWindow *win, UITouchPhase phase) 
                 [target touchesMoved:touches withEvent:sCarrierEvent];
                 for (UIView *v = target; v; v = v.superview) {
                     for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled) [g touchesMoved:touches withEvent:sCarrierEvent];
+                        if (g.isEnabled && [g respondsToSelector:@selector(touchesMoved:withEvent:)]) {
+                            [g touchesMoved:touches withEvent:sCarrierEvent];
+                        }
                     }
                 }
                 break;
@@ -407,7 +420,9 @@ static void chFakeTouchFire(CGPoint ptInWin, UIWindow *win, UITouchPhase phase) 
                 [target touchesCancelled:touches withEvent:sCarrierEvent];
                 for (UIView *v = target; v; v = v.superview) {
                     for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled) [g touchesCancelled:touches withEvent:sCarrierEvent];
+                        if (g.isEnabled && [g respondsToSelector:@selector(touchesCancelled:withEvent:)]) {
+                            [g touchesCancelled:touches withEvent:sCarrierEvent];
+                        }
                     }
                 }
                 break;
@@ -415,7 +430,9 @@ static void chFakeTouchFire(CGPoint ptInWin, UIWindow *win, UITouchPhase phase) 
                 [target touchesEnded:touches withEvent:sCarrierEvent];
                 for (UIView *v = target; v; v = v.superview) {
                     for (UIGestureRecognizer *g in v.gestureRecognizers) {
-                        if (g.isEnabled) [g touchesEnded:touches withEvent:sCarrierEvent];
+                        if (g.isEnabled && [g respondsToSelector:@selector(touchesEnded:withEvent:)]) {
+                            [g touchesEnded:touches withEvent:sCarrierEvent];
+                        }
                     }
                 }
                 break;
@@ -445,21 +462,29 @@ static void performAutoPlay(NSString *moveUCI, UIView *board) {
     }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // 1. Touch down on starting square
+        // 1. Chạm vào ô bắt đầu
         chFakeTouchFire(fromWin, win, UITouchPhaseBegan);
 
-        // 2. Touch move towards destination (drag simulation)
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // 2. Kéo nhẹ tới trung điểm
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             CGPoint midWin = CGPointMake((fromWin.x + toWin.x) / 2.0, (fromWin.y + toWin.y) / 2.0);
             chFakeTouchFire(midWin, win, UITouchPhaseMoved);
 
-            // 3. Touch move to destination
+            // 3. Kéo tới ô đích
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 chFakeTouchFire(toWin, win, UITouchPhaseMoved);
 
-                // 4. Touch release on destination
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                // 4. Nhả tay tại ô đích
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     chFakeTouchFire(toWin, win, UITouchPhaseEnded);
+
+                    // 5. Dự phòng tap-to-move cho giao diện nhận tap
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        chFakeTouchFire(toWin, win, UITouchPhaseBegan);
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            chFakeTouchFire(toWin, win, UITouchPhaseEnded);
+                        });
+                    });
                 });
             });
         });
