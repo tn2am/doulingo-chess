@@ -230,8 +230,6 @@ extern "C" void EngineStart(void) {
     static std::once_flag once;
     std::call_once(once, [] {
         std::thread(engineThread).detach();
-        gIn.push("setoption name Hash value 32\n");
-        gIn.push("setoption name Threads value 2\n");
     });
 }
 

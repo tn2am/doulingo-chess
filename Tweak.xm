@@ -774,51 +774,6 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
     }
 }
 
-// Adaptive color detection: when player touches a piece, detect their color automatically
-typedef void (*OrigTouchesBegan)(UIView *, SEL, NSSet *, UIEvent *);
-static OrigTouchesBegan gOrig_boardTouchesBegan = NULL;
-
-static void hook_BoardTouchesBegan(UIView *self, SEL _cmd, NSSet *touches, UIEvent *event) {
-    if (gOrig_boardTouchesBegan) gOrig_boardTouchesBegan(self, _cmd, touches, event);
-
-    UITouch *t = [touches anyObject];
-    if (t && self.bounds.size.width > 0) {
-        CGPoint pt = [t locationInView:self];
-        CGFloat minDim = MIN(self.bounds.size.width, self.bounds.size.height);
-        CGFloat offsetX = (self.bounds.size.width - minDim) / 2.0;
-        CGFloat offsetY = (self.bounds.size.height - minDim) / 2.0;
-        CGFloat s = minDim / 8.0;
-
-        int col = (int)((pt.x - offsetX) / s);
-        int row = (int)((pt.y - offsetY) / s);
-        if (col >= 0 && col < 8 && row >= 0 && row < 8) {
-            int file = gBoardFlipped ? (7 - col) : col;
-            int rank = gBoardFlipped ? row : (7 - row);
-            int sq = rank * 8 + file;
-            if (sq >= 0 && sq < 64) {
-                char p = gBoard[sq];
-                if (p >= 'A' && p <= 'Z') {
-                    if (gMyColor != 0) {
-                        dbg(@"[TỰ ĐỘNG CHUYỂN MÀU] Chạm quân Trắng -> Bạn là TRẮNG ⚪");
-                        gMyColor = 0;
-                        if (gFlipMode == 0) gBoardFlipped = NO;
-                        savePrefs();
-                        if (gCurrentFen) processFen(gCurrentFen);
-                    }
-                } else if (p >= 'a' && p <= 'z') {
-                    if (gMyColor != 1) {
-                        dbg(@"[TỰ ĐỘNG CHUYỂN MÀU] Chạm quân Đen -> Bạn là ĐEN ⚫");
-                        gMyColor = 1;
-                        if (gFlipMode == 0) gBoardFlipped = YES;
-                        savePrefs();
-                        if (gCurrentFen) processFen(gCurrentFen);
-                    }
-                }
-            }
-        }
-    }
-}
-
 typedef NSString *(*OrigFenString)(id, SEL);
 static OrigFenString gOrig_fenString = NULL;
 
@@ -888,37 +843,46 @@ static NSString *hook_FenNotation(id self, SEL _cmd) {
 }
 
 static void installDuolingoHooks(void) {
-    static BOOL hooksInstalled = NO;
-    if (hooksInstalled) return;
+    static BOOL fenHooked = NO;
+    static BOOL gsHooked = NO;
+    static BOOL smHooked = NO;
+    static BOOL boardHooked = NO;
 
-    dbg(@"Cài đặt hooks an toàn cho Duolingo Chess...");
-
-    Class fenCls = objc_getClass("DuolingoMultiplatformChessFen");
-    if (fenCls) {
-        SwizzleInstanceMethod(fenCls, NSSelectorFromString(@"fenString"), (IMP)hook_FenString, (IMP *)&gOrig_fenString);
+    if (!fenHooked) {
+        Class fenCls = objc_getClass("DuolingoMultiplatformChessFen");
+        if (fenCls) {
+            SwizzleInstanceMethod(fenCls, NSSelectorFromString(@"fenString"), (IMP)hook_FenString, (IMP *)&gOrig_fenString);
+            fenHooked = YES;
+        }
     }
 
-    Class gsCls = objc_getClass("DuolingoMultiplatformChessGameState");
-    if (gsCls) {
-        SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"fen"), (IMP)hook_GameStateFen, (IMP *)&gOrig_gameStateFen);
-        SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"setupModel"), (IMP)hook_GameStateSetupModel, (IMP *)&gOrig_gameStateSetupModel);
+    if (!gsHooked) {
+        Class gsCls = objc_getClass("DuolingoMultiplatformChessGameState");
+        if (gsCls) {
+            SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"fen"), (IMP)hook_GameStateFen, (IMP *)&gOrig_gameStateFen);
+            SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"setupModel"), (IMP)hook_GameStateSetupModel, (IMP *)&gOrig_gameStateSetupModel);
+            gsHooked = YES;
+        }
     }
 
-    Class smCls = objc_getClass("DuolingoMultiplatformChessGameSetupModel");
-    if (smCls) {
-        SwizzleInstanceMethod(smCls, NSSelectorFromString(@"fenNotation"), (IMP)hook_FenNotation, (IMP *)&gOrig_setupModelFenNotation);
+    if (!smHooked) {
+        Class smCls = objc_getClass("DuolingoMultiplatformChessGameSetupModel");
+        if (smCls) {
+            SwizzleInstanceMethod(smCls, NSSelectorFromString(@"fenNotation"), (IMP)hook_FenNotation, (IMP *)&gOrig_setupModelFenNotation);
+            smHooked = YES;
+        }
     }
 
-    NSArray *boardNames = @[@"ChessBoardView", @"_TtC5Chess14ChessBoardView", @"Chess.ChessBoardView", @"StaticChessBoardView"];
-    SEL layoutSel = @selector(layoutSubviews);
-    SEL touchSel = @selector(touchesBegan:withEvent:);
-    for (NSString *name in boardNames) {
-        Class bCls = objc_getClass(name.UTF8String);
-        if (bCls) {
-            SwizzleInstanceMethod(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrig_boardLayout);
-            SwizzleInstanceMethod(bCls, touchSel, (IMP)hook_BoardTouchesBegan, (IMP *)&gOrig_boardTouchesBegan);
-            hooksInstalled = YES;
-            break;
+    if (!boardHooked) {
+        NSArray *boardNames = @[@"ChessBoardView", @"_TtC5Chess14ChessBoardView", @"Chess.ChessBoardView", @"StaticChessBoardView"];
+        SEL layoutSel = @selector(layoutSubviews);
+        for (NSString *name in boardNames) {
+            Class bCls = objc_getClass(name.UTF8String);
+            if (bCls) {
+                SwizzleInstanceMethod(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrig_boardLayout);
+                boardHooked = YES;
+                break;
+            }
         }
     }
 
@@ -1543,7 +1507,6 @@ static void hook_WindowMakeKeyAndVisible(UIWindow *self, SEL _cmd) {
 __attribute__((constructor)) static void initTweak(void) {
     loadPrefs();
     dbg(@"Trợ Thủ Cờ Vua Duolingo (tn2am • Tốc Độ Cao & Cảnh Báo) đã nạp!");
-    EngineStart();
 
     Class winCls = [UIWindow class];
     SwizzleInstanceMethod(winCls, @selector(hitTest:withEvent:), (IMP)hook_WindowHitTest, (IMP *)&gOrig_WindowHitTest);
