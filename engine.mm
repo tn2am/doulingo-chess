@@ -85,12 +85,14 @@ OutBuf gOut;
 #define MAXPV 8
 struct Cand { std::string move; bool hasScore = false; bool isMate = false; int score = 0; bool filled = false; };
 
-struct Req { std::string fen; int depth; int elo; int multipv; EngineResultBlock cb; };
+struct Req { uint64_t id; std::string fen; int depth; int elo; int multipv; EngineResultBlock cb; };
 
 std::mutex        gReqMutex;
 std::deque<Req>   gQueue;
 bool              gBusy = false;
 EngineResultBlock gPending = nil;
+uint64_t          gPendingId = 0;
+uint64_t          gCurrentId = 0;
 Cand              gCand[MAXPV + 1];
 int               gWantPV = 1;
 
@@ -129,6 +131,7 @@ void startNext_locked() {
     Req r = gQueue.front(); gQueue.pop_front();
     gBusy = true;
     gPending = r.cb;
+    gPendingId = r.id;
     gWantPV = r.multipv;
     resetCands();
     applyOptions(r.elo, r.multipv);
@@ -171,9 +174,11 @@ void handleLine(const std::string &ln) {
         EngineResultBlock cb = nil;
         EngineLine out[MAXPV];
         int count = 0;
+        bool isCurrent = false;
         {
             std::lock_guard<std::mutex> lk(gReqMutex);
             cb = gPending; gPending = nil;
+            isCurrent = (gPendingId == gCurrentId);
             gBusy = false;
             for (int i = 1; i <= gWantPV && i <= MAXPV; i++) {
                 if (!gCand[i].filled) break;
@@ -193,7 +198,7 @@ void handleLine(const std::string &ln) {
             }
             startNext_locked();
         }
-        if (cb) cb(out, count);
+        if (isCurrent && cb) cb(out, count);
     }
 }
 
@@ -231,9 +236,15 @@ extern "C" void EngineGo(const char *fen, int depth, int elo, int multipv, Engin
 
     std::lock_guard<std::mutex> lk(gReqMutex);
 
-    while (gQueue.size() >= 4) gQueue.pop_front();
-    gQueue.push_back(Req{ std::string(fen), depth, elo, multipv, [done copy] });
-    startNext_locked();
+    uint64_t reqId = ++gCurrentId;
+    gQueue.clear();
+    gQueue.push_back(Req{ reqId, std::string(fen), depth, elo, multipv, [done copy] });
+
+    if (gBusy) {
+        gIn.push("stop\n");
+    } else {
+        startNext_locked();
+    }
 }
 
 extern "C" bool StockfishFenLegal(const char *fen) {
