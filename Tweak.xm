@@ -807,7 +807,7 @@ static void installDuolingoHooks(void) {
     }
 
     // Periodic match cleanup timer
-    [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
+    [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
         if (gBoardView && (!gBoardView.window || gBoardView.hidden || gBoardView.alpha < 0.1)) {
             gBoardView = nil;
             gCurrentFen = nil;

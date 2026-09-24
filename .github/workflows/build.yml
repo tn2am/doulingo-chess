@@ -79,6 +79,17 @@ jobs:
             make.log
             .theos/
 
+      - name: Publish Failure Log to Releases
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest make.log \
+            --title "Build Error Log" \
+            --notes "Make log from failed build" \
+            --prerelease
+
       - name: Upload Dylib Artifact
         uses: actions/upload-artifact@v4
         with:
