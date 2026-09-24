@@ -225,7 +225,7 @@ static void processFen(NSString *fen) {
     gLastEvalFen = [fen copy];
     gFetching = YES;
 
-    dbg([NSString stringWithFormat:@"Engine analyzing FEN: %@", fen]);
+    dbg([NSString stringWithFormat:@"Engine phân tích FEN: %@", fen]);
 
     if (gUseMaia && MaiaAvailable()) {
         MaiaGo([fen UTF8String], (int)gElo, (int)gElo, ^(MaiaResult res) {
@@ -271,6 +271,40 @@ static void processFen(NSString *fen) {
     });
 }
 
+// --- TOAST NOTIFICATION ---
+static void showToast(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static UIWindow *toastWin = nil;
+        if (!toastWin) {
+            toastWin = [[UIWindow alloc] initWithFrame:CGRectMake(0, 50, [UIScreen mainScreen].bounds.size.width, 60)];
+            toastWin.windowLevel = UIWindowLevelAlert + 4;
+            toastWin.backgroundColor = [UIColor clearColor];
+            toastWin.userInteractionEnabled = NO;
+        }
+
+        [toastWin.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
+
+        UIView *toast = [[UIView alloc] initWithFrame:CGRectMake(40, 6, toastWin.bounds.size.width - 80, 44)];
+        toast.backgroundColor = [UIColor colorWithRed:0.12 green:0.15 blue:0.18 alpha:0.95];
+        toast.layer.cornerRadius = 22;
+        toast.layer.borderColor = [CH_ACCENT CGColor];
+        toast.layer.borderWidth = 1.2;
+
+        UILabel *lbl = [[UILabel alloc] initWithFrame:toast.bounds];
+        lbl.text = text;
+        lbl.textColor = [UIColor whiteColor];
+        lbl.font = [UIFont boldSystemFontOfSize:14];
+        lbl.textAlignment = NSTextAlignmentCenter;
+        [toast addSubview:lbl];
+        [toastWin addSubview:toast];
+        toastWin.hidden = NO;
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            toastWin.hidden = YES;
+        });
+    });
+}
+
 // --- FLOATING BUTTON & UI ---
 @interface DuoChessBtnHandler : NSObject
 + (void)floatBtnTapped;
@@ -304,7 +338,8 @@ static void showSettingsMenu(void);
     gEnabled = !gEnabled;
     savePrefs();
     if (!gEnabled) clearArrows();
-    dbg([NSString stringWithFormat:@"Toggled Assistant: %@", gEnabled ? @"ON" : @"OFF"]);
+    dbg([NSString stringWithFormat:@"Trạng thái trợ thủ: %@", gEnabled ? @"BẬT" : @"TẮT"]);
+    showToast(gEnabled ? @"▶ Đã bật Trợ Thủ Cờ Vua" : @"⏸ Đã tạm dừng Trợ Thủ");
 }
 @end
 
@@ -312,16 +347,21 @@ static void showSettingsMenu(void);
 + (void)eloChanged:(UISlider *)slider {
     gElo = (NSInteger)slider.value;
     if (gEloLabel) {
-        gEloLabel.text = [NSString stringWithFormat:@"Engine ELO: %ld", (long)gElo];
+        gEloLabel.text = [NSString stringWithFormat:@"Độ khó Engine: %ld ELO", (long)gElo];
     }
     savePrefs();
 }
 + (void)copyFenTapped:(UIButton *)btn {
     if (gCurrentFen.length) {
         [UIPasteboard generalPasteboard].string = gCurrentFen;
-        [btn setTitle:@"Copied!" forState:UIControlStateNormal];
+        [btn setTitle:@"✓ Đã sao chép FEN!" forState:UIControlStateNormal];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [btn setTitle:@"Copy Current FEN" forState:UIControlStateNormal];
+            [btn setTitle:@"📋 Sao chép FEN bàn cờ" forState:UIControlStateNormal];
+        });
+    } else {
+        [btn setTitle:@"Chưa có dữ liệu bàn cờ" forState:UIControlStateNormal];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [btn setTitle:@"📋 Sao chép FEN bàn cờ" forState:UIControlStateNormal];
         });
     }
 }
@@ -373,52 +413,67 @@ static void setupFloatingButton(void) {
 }
 %end
 
-// --- SETTINGS PANEL ---
+// --- SETTINGS PANEL (VIETNAMESE UI) ---
 static void showSettingsMenu(void) {
     if (!gMenuWin) {
         gMenuWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         gMenuWin.windowLevel = UIWindowLevelAlert + 3;
-        gMenuWin.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+        gMenuWin.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
         gMenuWin.rootViewController = [[UIViewController alloc] init];
     }
 
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(24, 80, [UIScreen mainScreen].bounds.size.width - 48, 380)];
-    panel.backgroundColor = [UIColor colorWithRed:0.12 green:0.15 blue:0.18 alpha:0.96];
-    panel.layer.cornerRadius = 16;
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(24, 75, [UIScreen mainScreen].bounds.size.width - 48, 390)];
+    panel.backgroundColor = [UIColor colorWithRed:0.12 green:0.15 blue:0.18 alpha:0.97];
+    panel.layer.cornerRadius = 18;
     panel.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1].CGColor;
     panel.layer.borderWidth = 1;
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 16, 200, 24)];
-    title.text = @"Duolingo Chess Assist";
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 16, panel.bounds.size.width - 32, 24)];
+    title.text = @"Trợ Thủ Cờ Vua Duolingo";
     title.textColor = [UIColor whiteColor];
-    title.font = [UIFont boldSystemFontOfSize:17];
+    title.font = [UIFont boldSystemFontOfSize:18];
     [panel addSubview:title];
 
-    gEloLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 56, 200, 20)];
-    gEloLabel.text = [NSString stringWithFormat:@"Engine ELO: %ld", (long)gElo];
+    UILabel *credit = [[UILabel alloc] initWithFrame:CGRectMake(16, 42, panel.bounds.size.width - 32, 18)];
+    credit.text = @"Phát triển bởi tn2am • Stockfish 18 NNUE";
+    credit.textColor = CH_ACCENT;
+    credit.font = [UIFont systemFontOfSize:12];
+    [panel addSubview:credit];
+
+    gEloLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 75, panel.bounds.size.width - 32, 20)];
+    gEloLabel.text = [NSString stringWithFormat:@"Độ khó Engine: %ld ELO", (long)gElo];
     gEloLabel.textColor = [UIColor lightTextColor];
     gEloLabel.font = [UIFont systemFontOfSize:14];
     [panel addSubview:gEloLabel];
 
-    UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(16, 80, panel.bounds.size.width - 32, 30)];
+    UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(16, 102, panel.bounds.size.width - 32, 30)];
     slider.minimumValue = 400; slider.maximumValue = 3000; slider.value = gElo;
     [slider addTarget:[DuoPanelHandler class] action:@selector(eloChanged:) forControlEvents:UIControlEventValueChanged];
     [panel addSubview:slider];
 
     UIButton *fenBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    fenBtn.frame = CGRectMake(16, 130, panel.bounds.size.width - 32, 40);
-    fenBtn.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1];
-    fenBtn.layer.cornerRadius = 8;
-    [fenBtn setTitle:@"Copy Current FEN" forState:UIControlStateNormal];
+    fenBtn.frame = CGRectMake(16, 150, panel.bounds.size.width - 32, 42);
+    fenBtn.backgroundColor = [UIColor colorWithWhite:0.22 alpha:1];
+    fenBtn.layer.cornerRadius = 10;
+    [fenBtn setTitle:@"📋 Sao chép FEN bàn cờ" forState:UIControlStateNormal];
     [fenBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    fenBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
     [fenBtn addTarget:[DuoPanelHandler class] action:@selector(copyFenTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:fenBtn];
 
+    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(16, 210, panel.bounds.size.width - 32, 40)];
+    hint.text = @"Mẹo: Nhấn và giữ nút nổi ♟ để bật hoặc tạm dừng nhanh gợi ý nước đi.";
+    hint.textColor = [UIColor colorWithWhite:0.7 alpha:1];
+    hint.font = [UIFont systemFontOfSize:12];
+    hint.numberOfLines = 2;
+    hint.textAlignment = NSTextAlignmentCenter;
+    [panel addSubview:hint];
+
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(16, 310, panel.bounds.size.width - 32, 44);
+    closeBtn.frame = CGRectMake(16, 315, panel.bounds.size.width - 32, 46);
     closeBtn.backgroundColor = CH_ACCENT;
-    closeBtn.layer.cornerRadius = 10;
-    [closeBtn setTitle:@"Done" forState:UIControlStateNormal];
+    closeBtn.layer.cornerRadius = 12;
+    [closeBtn setTitle:@"Hoàn tất" forState:UIControlStateNormal];
     [closeBtn setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
     closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     [closeBtn addTarget:[DuoPanelHandler class] action:@selector(closeTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -449,7 +504,7 @@ static OrigFenInit gOrigFenInit = NULL;
 static id hook_FenInit(id self, SEL _cmd, NSString *fenNotation) {
     id res = gOrigFenInit ? gOrigFenInit(self, _cmd, fenNotation) : self;
     if (fenNotation && [fenNotation isKindOfClass:[NSString class]] && fenNotation.length > 10) {
-        dbg([NSString stringWithFormat:@"Captured FEN from init: %@", fenNotation]);
+        dbg([NSString stringWithFormat:@"Bắt FEN từ khởi tạo: %@", fenNotation]);
         dispatch_async(dispatch_get_main_queue(), ^{
             processFen(fenNotation);
         });
@@ -468,7 +523,7 @@ static void installDuolingoHooks(void) {
         Method m = class_getInstanceMethod(fenCls, initSel);
         if (m) {
             MSHookMessageEx(fenCls, initSel, (IMP)hook_FenInit, (IMP *)&gOrigFenInit);
-            dbg(@"HOOKED DuolingoMultiplatformChessFen initWithFenNotation:");
+            dbg(@"ĐÃ HOOK DuolingoMultiplatformChessFen initWithFenNotation:");
         }
     }
 
@@ -479,7 +534,7 @@ static void installDuolingoHooks(void) {
         Class bCls = objc_getClass(name.UTF8String);
         if (bCls) {
             MSHookMessageEx(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrigBoardLayout);
-            dbg([NSString stringWithFormat:@"HOOKED layoutSubviews on %@", name]);
+            dbg([NSString stringWithFormat:@"ĐÃ HOOK layoutSubviews trên %@", name]);
             hooksInstalled = YES;
             break;
         }
@@ -489,7 +544,7 @@ static void installDuolingoHooks(void) {
 // --- INITIALIZER ---
 %ctor {
     loadPrefs();
-    dbg(@"Duolingo Chess Assistant loaded!");
+    dbg(@"Trợ Thủ Cờ Vua Duolingo (tn2am) đã nạp thành công!");
     EngineStart();
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification

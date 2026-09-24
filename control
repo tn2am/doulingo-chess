@@ -1,9 +1,9 @@
-Package: com.duolingo.chessassistant
-Name: Duolingo Chess Assistant
+Package: com.tn2am.duolingochess
+Name: Trợ Thủ Cờ Vua Duolingo
 Depends: mobilesubstrate
 Version: 1.0.0
 Architecture: iphoneos-arm64
-Description: On-device chess move assistant for Duolingo with bundled Stockfish 18 and Maia 3.
-Maintainer: Assistant
-Author: Assistant
+Description: Trợ thủ cờ vua chạy on-device cho Duolingo tích hợp Stockfish 18. Tác giả: tn2am.
+Maintainer: tn2am
+Author: tn2am
 Section: Tweaks
