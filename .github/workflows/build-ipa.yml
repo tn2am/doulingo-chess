@@ -1,0 +1,63 @@
+name: Build Duolingo IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: "Direct URL to a decrypted Duolingo .ipa (or leave empty if building locally)"
+        required: true
+        type: string
+      label:
+        description: "Label for the output filename (e.g. ios16, ios17)"
+        required: true
+        default: "ios17"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download decrypted IPA
+        run: |
+          curl -fL --retry 3 -o duolingo.ipa "${{ inputs.ipa_url }}"
+          [ -s duolingo.ipa ] || { echo "::error::downloaded IPA is empty"; exit 1; }
+
+      - name: Read Duolingo version + set output name
+        run: |
+          unzip -qq duolingo.ipa -d _ver
+          PLIST="$(find _ver/Payload -maxdepth 2 -name Info.plist | head -1)"
+          VER="$(plutil -extract CFBundleShortVersionString raw -o - "$PLIST" 2>/dev/null || echo unknown)"
+          rm -rf _ver
+          echo "DUO_VER=$VER" >> "$GITHUB_ENV"
+          echo "OUT=DuolingoChessAssist_v${VER}_${{ inputs.label }}.ipa" >> "$GITHUB_ENV"
+          echo "output: DuolingoChessAssist_v${VER}_${{ inputs.label }}.ipa"
+
+      - name: Download Duolingo Chess Assistant .deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download latest --repo "$GITHUB_REPOSITORY" --pattern '*.deb' --dir . --clobber
+          mv *.deb duo-assistant.deb
+          ls -la duo-assistant.deb
+
+      - name: Install cyan
+        run: |
+          brew install ldid
+          pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+
+      - name: Inject tweak into Duolingo IPA
+        run: |
+          cyan -i duolingo.ipa -o "$OUT" \
+               -uwef duo-assistant.deb -n "Duolingo" -b com.duolingo.DuolingoMobile
+          ls -la "$OUT"
+
+      - name: Publish IPA to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload latest "$OUT" --repo "$GITHUB_REPOSITORY" --clobber

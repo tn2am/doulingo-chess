@@ -1,0 +1,9 @@
+Package: com.duolingo.chessassistant
+Name: Duolingo Chess Assistant
+Depends: mobilesubstrate
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: On-device chess move assistant for Duolingo with bundled Stockfish 18 and Maia 3.
+Maintainer: Assistant
+Author: Assistant
+Section: Tweaks

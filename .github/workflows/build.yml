@@ -1,0 +1,73 @@
+name: Build Duolingo Chess Dylib
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone Stockfish 18 + fetch net
+        run: |
+          git clone --depth 1 --branch sf_18 https://github.com/official-stockfish/Stockfish.git sf
+          cd sf/src && make net && ls -la *.nnue
+
+      - name: Cross-compile Stockfish for iOS arm64 -> libstockfish.a
+        run: |
+          cd sf/src
+          SDK=$(xcrun -sdk iphoneos --show-sdk-path)
+          CXX=$(xcrun -sdk iphoneos -f clang++)
+          FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=15.0 \
+                 -std=c++17 -O3 -DNDEBUG -fno-exceptions \
+                 -DUSE_PTHREADS -DIS_64BIT -DUSE_POPCNT -DUSE_NEON=8 \
+                 -I. -w"
+          set -e
+          for f in $(find . -name '*.cpp' ! -path './universal/*'); do
+            $CXX $FLAGS -c "$f" -o "$f.o"
+          done
+          ar rcs libstockfish.a $(find . -name '*.cpp.o' ! -name 'main.cpp.o')
+          echo "libstockfish.a: $(du -h libstockfish.a | cut -f1)"
+
+      - name: Setup Theos
+        uses: beerpiss/theos-action@v1
+        with:
+          cache: true
+
+      - name: Build .deb & extract dylib
+        run: |
+          make package FINALPACKAGE=1
+          # Locate and copy the compiled .dylib directly
+          find .theos/ -name "Chess.dylib" -exec cp {} ./DuolingoChess.dylib \;
+          if [ ! -f ./DuolingoChess.dylib ]; then
+            # Extract from .deb if not directly in .theos
+            DEB=$(ls packages/*.deb | head -1)
+            dpkg -x "$DEB" deb_extracted
+            find deb_extracted/ -name "Chess.dylib" -exec cp {} ./DuolingoChess.dylib \;
+          fi
+          ls -lh ./DuolingoChess.dylib
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
+      - name: Upload Dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DuolingoChess-dylib
+          path: ./DuolingoChess.dylib
+
+      - name: Publish Dylib to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest ./DuolingoChess.dylib \
+            --title "Duolingo Chess Dylib" \
+            --notes "Compiled arm64 dylib for Duolingo Chess assistant." \
+            --prerelease
