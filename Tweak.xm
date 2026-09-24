@@ -1,6 +1,5 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-#import <substrate.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
@@ -277,7 +276,7 @@ static void showToast(NSString *text) {
         static UIWindow *toastWin = nil;
         if (!toastWin) {
             toastWin = [[UIWindow alloc] initWithFrame:CGRectMake(0, 50, [UIScreen mainScreen].bounds.size.width, 60)];
-            toastWin.windowLevel = UIWindowLevelAlert + 4;
+            toastWin.windowLevel = UIWindowLevelStatusBar + 150.0;
             toastWin.backgroundColor = [UIColor clearColor];
             toastWin.userInteractionEnabled = NO;
         }
@@ -370,56 +369,106 @@ static void showSettingsMenu(void);
 }
 @end
 
-static void setupFloatingButton(void) {
-    if (gBtnWin) return;
-    gBtnWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    gBtnWin.windowLevel = UIWindowLevelAlert + 2;
-    gBtnWin.backgroundColor = [UIColor clearColor];
-    gBtnWin.rootViewController = [[UIViewController alloc] init];
-    gBtnWin.rootViewController.view.backgroundColor = [UIColor clearColor];
+static UIWindowScene *getActiveWindowScene(void) {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                if (ws.activationState == UISceneActivationStateForegroundActive ||
+                    ws.activationState == UISceneActivationStateForegroundInactive) {
+                    return ws;
+                }
+            }
+        }
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                return (UIWindowScene *)scene;
+            }
+        }
+    }
+    return nil;
+}
 
-    CGFloat btnSize = 44;
+static void setupFloatingButton(void) {
+    UIWindowScene *scene = getActiveWindowScene();
+
+    if (!gBtnWin) {
+        if (@available(iOS 13.0, *)) {
+            if (scene) {
+                gBtnWin = [[UIWindow alloc] initWithWindowScene:scene];
+            }
+        }
+        if (!gBtnWin) {
+            gBtnWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        }
+    } else if (@available(iOS 13.0, *)) {
+        if (!gBtnWin.windowScene && scene) {
+            gBtnWin.windowScene = scene;
+        }
+    }
+
+    gBtnWin.windowLevel = UIWindowLevelStatusBar + 100.0;
+    gBtnWin.backgroundColor = [UIColor clearColor];
+    if (!gBtnWin.rootViewController) {
+        gBtnWin.rootViewController = [[UIViewController alloc] init];
+        gBtnWin.rootViewController.view.backgroundColor = [UIColor clearColor];
+    }
+
+    CGFloat btnSize = 48;
     CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
     CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
 
-    gFloatBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    gFloatBtn.frame = CGRectMake(screenW - btnSize - 12, screenH * 0.40, btnSize, btnSize);
-    gFloatBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.22 blue:0.25 alpha:0.92];
-    gFloatBtn.layer.cornerRadius = 10;
-    gFloatBtn.layer.borderColor = [UIColor colorWithRed:0.35 green:0.75 blue:0.40 alpha:0.8].CGColor;
-    gFloatBtn.layer.borderWidth = 1.5;
-    [gFloatBtn setTitle:@"♟" forState:UIControlStateNormal];
-    gFloatBtn.titleLabel.font = [UIFont systemFontOfSize:22];
+    if (!gFloatBtn) {
+        gFloatBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        gFloatBtn.frame = CGRectMake(screenW - btnSize - 12, screenH * 0.40, btnSize, btnSize);
+        gFloatBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.22 blue:0.25 alpha:0.95];
+        gFloatBtn.layer.cornerRadius = 14;
+        gFloatBtn.layer.borderColor = [UIColor colorWithRed:0.35 green:0.75 blue:0.40 alpha:0.95].CGColor;
+        gFloatBtn.layer.borderWidth = 2.0;
+        [gFloatBtn setTitle:@"♟" forState:UIControlStateNormal];
+        gFloatBtn.titleLabel.font = [UIFont systemFontOfSize:24];
 
-    [gFloatBtn addTarget:[DuoChessBtnHandler class] action:@selector(floatBtnTapped) forControlEvents:UIControlEventTouchUpInside];
-    [gFloatBtn addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:[DuoChessBtnHandler class] action:@selector(handlePan:)]];
-    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:[DuoChessBtnHandler class] action:@selector(handleLongPress:)];
-    lp.minimumPressDuration = 0.4;
-    [gFloatBtn addGestureRecognizer:lp];
+        [gFloatBtn addTarget:[DuoChessBtnHandler class] action:@selector(floatBtnTapped) forControlEvents:UIControlEventTouchUpInside];
+        [gFloatBtn addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:[DuoChessBtnHandler class] action:@selector(handlePan:)]];
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:[DuoChessBtnHandler class] action:@selector(handleLongPress:)];
+        lp.minimumPressDuration = 0.4;
+        [gFloatBtn addGestureRecognizer:lp];
 
-    [gBtnWin.rootViewController.view addSubview:gFloatBtn];
+        [gBtnWin.rootViewController.view addSubview:gFloatBtn];
+    }
+
     gBtnWin.hidden = NO;
     [gBtnWin makeKeyAndVisible];
+    dbg(@"Đã hiển thị nút nổi ♟");
 }
 
-%hook UIWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+// Hook hitTest on UIWindow without Substrate
+static UIView *(*gOrig_WindowHitTest)(UIWindow *, SEL, CGPoint, UIEvent *) = NULL;
+static UIView *hook_WindowHitTest(UIWindow *self, SEL _cmd, CGPoint point, UIEvent *event) {
     if (self == gBtnWin) {
-        CGPoint btnPoint = [gFloatBtn convertPoint:point fromView:self.rootViewController.view];
-        if ([gFloatBtn pointInside:btnPoint withEvent:event]) return gFloatBtn;
+        if (gFloatBtn && self.rootViewController) {
+            CGPoint btnPoint = [gFloatBtn convertPoint:point fromView:self.rootViewController.view];
+            if ([gFloatBtn pointInside:btnPoint withEvent:event]) return gFloatBtn;
+        }
         return nil;
     }
-    return %orig;
+    return gOrig_WindowHitTest ? gOrig_WindowHitTest(self, _cmd, point, event) : nil;
 }
-%end
 
 // --- SETTINGS PANEL (VIETNAMESE UI) ---
 static void showSettingsMenu(void) {
+    UIWindowScene *scene = getActiveWindowScene();
+
     if (!gMenuWin) {
-        gMenuWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        gMenuWin.windowLevel = UIWindowLevelAlert + 3;
+        if (@available(iOS 13.0, *)) {
+            if (scene) gMenuWin = [[UIWindow alloc] initWithWindowScene:scene];
+        }
+        if (!gMenuWin) gMenuWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        gMenuWin.windowLevel = UIWindowLevelStatusBar + 120.0;
         gMenuWin.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
         gMenuWin.rootViewController = [[UIViewController alloc] init];
+    } else if (@available(iOS 13.0, *)) {
+        if (!gMenuWin.windowScene && scene) gMenuWin.windowScene = scene;
     }
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(24, 75, [UIScreen mainScreen].bounds.size.width - 48, 390)];
@@ -485,6 +534,27 @@ static void showSettingsMenu(void) {
     [gMenuWin makeKeyAndVisible];
 }
 
+// --- PURE RUNTIME SWIZZLER (NO SUBSTRATE REQUIRED) ---
+static void SwizzleMethod(Class cls, SEL origSel, IMP newImp, IMP *origImp) {
+    if (!cls || !origSel || !newImp) return;
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    if (!origMethod) return;
+
+    if (origImp) {
+        *origImp = method_getImplementation(origMethod);
+    }
+
+    const char *types = method_getTypeEncoding(origMethod);
+    if (class_addMethod(cls, origSel, newImp, types)) {
+        Method superMethod = class_getInstanceMethod(class_getSuperclass(cls), origSel);
+        if (superMethod && origImp) {
+            *origImp = method_getImplementation(superMethod);
+        }
+    } else {
+        method_setImplementation(origMethod, newImp);
+    }
+}
+
 // --- DUOLINGO HOOKS ---
 
 typedef void (*OrigLayout)(id, SEL);
@@ -512,6 +582,16 @@ static id hook_FenInit(id self, SEL _cmd, NSString *fenNotation) {
     return res;
 }
 
+static void (*gOrig_WindowMakeKeyAndVisible)(UIWindow *, SEL) = NULL;
+static void hook_WindowMakeKeyAndVisible(UIWindow *self, SEL _cmd) {
+    if (gOrig_WindowMakeKeyAndVisible) gOrig_WindowMakeKeyAndVisible(self, _cmd);
+    if (self != gBtnWin && self != gMenuWin) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            setupFloatingButton();
+        });
+    }
+}
+
 static void installDuolingoHooks(void) {
     static BOOL hooksInstalled = NO;
     if (hooksInstalled) return;
@@ -520,11 +600,8 @@ static void installDuolingoHooks(void) {
     Class fenCls = objc_getClass("DuolingoMultiplatformChessFen");
     if (fenCls) {
         SEL initSel = NSSelectorFromString(@"initWithFenNotation:");
-        Method m = class_getInstanceMethod(fenCls, initSel);
-        if (m) {
-            MSHookMessageEx(fenCls, initSel, (IMP)hook_FenInit, (IMP *)&gOrigFenInit);
-            dbg(@"ĐÃ HOOK DuolingoMultiplatformChessFen initWithFenNotation:");
-        }
+        SwizzleMethod(fenCls, initSel, (IMP)hook_FenInit, (IMP *)&gOrigFenInit);
+        dbg(@"ĐÃ HOOK DuolingoMultiplatformChessFen");
     }
 
     // 2. Hook ChessBoardView layoutSubviews
@@ -533,7 +610,7 @@ static void installDuolingoHooks(void) {
     for (NSString *name in boardNames) {
         Class bCls = objc_getClass(name.UTF8String);
         if (bCls) {
-            MSHookMessageEx(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrigBoardLayout);
+            SwizzleMethod(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrigBoardLayout);
             dbg([NSString stringWithFormat:@"ĐÃ HOOK layoutSubviews trên %@", name]);
             hooksInstalled = YES;
             break;
@@ -541,19 +618,32 @@ static void installDuolingoHooks(void) {
     }
 }
 
-// --- INITIALIZER ---
-%ctor {
+// --- CONSTRUCTOR ---
+__attribute__((constructor)) static void initTweak(void) {
     loadPrefs();
-    dbg(@"Trợ Thủ Cờ Vua Duolingo (tn2am) đã nạp thành công!");
+    dbg(@"Trợ Thủ Cờ Vua Duolingo (tn2am) đã nạp constructor!");
     EngineStart();
 
+    // Hook UIWindow hitTest and makeKeyAndVisible
+    Class winCls = [UIWindow class];
+    SwizzleMethod(winCls, @selector(hitTest:withEvent:), (IMP)hook_WindowHitTest, (IMP *)&gOrig_WindowHitTest);
+    SwizzleMethod(winCls, @selector(makeKeyAndVisible), (IMP)hook_WindowMakeKeyAndVisible, (IMP *)&gOrig_WindowMakeKeyAndVisible);
+
+    // Setup hooks on scene and app active
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        setupFloatingButton();
+        installDuolingoHooks();
+    }];
+
+    // Multiple delayed fail-safe attempts to show the button
+    double delays[] = { 0.5, 1.2, 2.5, 4.0, 6.0 };
+    for (int i = 0; i < 5; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delays[i] * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             setupFloatingButton();
             installDuolingoHooks();
         });
-    }];
+    }
 }
