@@ -175,6 +175,9 @@ static NSInteger eloToDepth(NSInteger elo) {
 static void clearArrows(void);
 static void fetchMove(NSString *fen);
 static void processFen(NSString *fen);
+static void updateBoardFlipped(void);
+static UIView *findBoardInView(UIView *root);
+static UIView *findActiveBoardView(void);
 
 // Reset clean state for a new game / opponent match
 static void resetForNewGame(NSString *reason) {
@@ -537,6 +540,95 @@ static void performAutoPlay(NSString *moveUCI, UIView *board) {
     });
 }
 
+// --- DYNAMIC BOARD FINDER (BOT & PVP SUPPORT) ---
+static UIView *findBoardInView(UIView *root) {
+    if (!root) return nil;
+    NSString *rootName = NSStringFromClass([root class]);
+    if ([rootName containsString:@"ChessBoardView"] || [rootName containsString:@"StaticChessBoardView"]) {
+        return root;
+    }
+    for (UIView *sub in root.subviews) {
+        if (!sub.hidden && sub.alpha > 0.1) {
+            NSString *cn = NSStringFromClass([sub class]);
+            if ([cn containsString:@"ChessBoardView"] || [cn containsString:@"StaticChessBoardView"] ||
+                [cn containsString:@"ChessBoardRiveWrapper"] || [cn containsString:@"ChessOscarBoardView"] ||
+                [cn containsString:@"ChessUnityView"]) {
+                return sub;
+            }
+            if (sub.bounds.size.width >= 180 && sub.bounds.size.height >= 180 &&
+                fabs(sub.bounds.size.width - sub.bounds.size.height) < 40.0) {
+                return sub;
+            }
+            UIView *deep = findBoardInView(sub);
+            if (deep && deep != root) return deep;
+        }
+    }
+    return root;
+}
+
+static UIView *findActiveBoardView(void) {
+    UIWindow *keyWin = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                for (UIWindow *w in ws.windows) {
+                    if (w != gBtnWin && w != gMenuWin && !w.hidden && w.alpha > 0.5) {
+                        keyWin = w;
+                        break;
+                    }
+                }
+            }
+            if (keyWin) break;
+        }
+    }
+    if (!keyWin) keyWin = [UIApplication sharedApplication].keyWindow;
+    if (!keyWin) return nil;
+
+    __block UIView *bestBoard = nil;
+    __block int bestScore = -1;
+
+    void (^checkView)(UIView *, void (^)(UIView *)) = ^(UIView *v, void (^recurse)(UIView *)) {
+        if (!v || v.hidden || v.alpha < 0.1) return;
+        CGRect b = v.bounds;
+        CGFloat w = b.size.width;
+        CGFloat h = b.size.height;
+        NSString *clsName = NSStringFromClass([v class]);
+
+        int score = -1;
+        if ([clsName containsString:@"ChessBoardView"] || [clsName containsString:@"StaticChessBoardView"] || [clsName containsString:@"ChessBoardRiveWrapper"]) {
+            score = 100;
+        } else if ([clsName containsString:@"ChessOscarBoardView"] || [clsName containsString:@"ChessUnityView"]) {
+            score = 90;
+        } else if ([clsName containsString:@"ChessPvPMatchContentView"] || [clsName containsString:@"ChessPvPMatchContainerView"] || [clsName containsString:@"ChessMatchContainerView"]) {
+            score = 50;
+        } else if (w >= 180 && h >= 180 && fabs(w - h) < 40.0 && [clsName containsString:@"Chess"]) {
+            score = 70;
+        }
+
+        if (score > bestScore && w >= 150 && h >= 150) {
+            bestScore = score;
+            bestBoard = v;
+        }
+
+        for (UIView *sub in v.subviews) {
+            recurse(sub);
+        }
+    };
+
+    void (^recurseBlock)(UIView *) = ^(UIView *v) {
+        checkView(v, recurseBlock);
+    };
+
+    recurseBlock(keyWin);
+
+    if (bestBoard) {
+        UIView *inner = findBoardInView(bestBoard);
+        if (inner) return inner;
+    }
+    return bestBoard;
+}
+
 // Forward declaration
 static void fetchMove(NSString *fen);
 
@@ -574,6 +666,11 @@ static void processFen(NSString *fen) {
 
 static void fetchMove(NSString *fen) {
     if (!gEnabled || !fen.length) return;
+
+    if (!gBoardView || !gBoardView.window) {
+        gBoardView = findActiveBoardView();
+        if (gBoardView) updateBoardFlipped();
+    }
 
     parseFEN(fen);
 
@@ -629,6 +726,10 @@ static void fetchMove(NSString *fen) {
                     @"label": gBestEvalStr,
                     @"rank": @0
                 };
+                if (!gBoardView || !gBoardView.window) {
+                    gBoardView = findActiveBoardView();
+                    if (gBoardView) updateBoardFlipped();
+                }
                 if (gBoardView && (gMyColor == gTurnColor)) {
                     drawArrows(@[arrow], gBoardView, gBoardFlipped, NO);
                     if (gAutoPlay && ![gLastAutoPlayed isEqualToString:fen]) {
@@ -678,6 +779,10 @@ static void fetchMove(NSString *fen) {
                 }];
             }
 
+            if (!gBoardView || !gBoardView.window) {
+                gBoardView = findActiveBoardView();
+                if (gBoardView) updateBoardFlipped();
+            }
             if (gBoardView && (gMyColor == gTurnColor)) {
                 drawArrows(arrows, gBoardView, gBoardFlipped, NO);
 
@@ -794,31 +899,48 @@ static void detectColorFromSetupModel(id sm) {
 static void detectColorFromGameState(id gs) {
     if (!gs || gMyColorLocked) return;
 
-    SEL smSel = NSSelectorFromString(@"setupModel");
-    if ([gs respondsToSelector:smSel]) {
-        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, smSel);
-        if (sm) {
-            detectColorFromSetupModel(sm);
-            if (gMyColorLocked) return;
+    NSInteger detected = -1;
+
+    // 1. Ưu tiên cao nhất: Lấy userColor trực tiếp từ GameState (chuẩn xác cho cả Bot và PvP)
+    SEL ucSel = NSSelectorFromString(@"userColor");
+    if ([gs respondsToSelector:ucSel]) {
+        id uc = ((id (*)(id, SEL))objc_msgSend)(gs, ucSel);
+        detected = detectColorValue(uc);
+        if (detected >= 0) {
+            gMyColor = detected;
+            gMyColorLocked = YES;
+            updateBoardFlipped();
+            dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Nhận diện chuẩn từ GameState.userColor: %@",
+                 gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+            return;
         }
     }
 
-    NSInteger detected = -1;
-    NSArray *colorSelectors = @[@"userColor", @"playerColor", @"myColor", @"humanColor", @"side"];
+    // 2. Kiểm tra các selector màu khác
+    NSArray *colorSelectors = @[@"playerColor", @"myColor", @"humanColor", @"side"];
     for (NSString *sName in colorSelectors) {
         SEL s = NSSelectorFromString(sName);
         if ([gs respondsToSelector:s]) {
             id uc = ((id (*)(id, SEL))objc_msgSend)(gs, s);
             detected = detectColorValue(uc);
-            if (detected >= 0) break;
+            if (detected >= 0) {
+                gMyColor = detected;
+                gMyColorLocked = YES;
+                updateBoardFlipped();
+                dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Nhận diện từ GameState.%@: %@",
+                     sName, gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+                return;
+            }
         }
     }
 
-    if (detected >= 0) {
-        gMyColor = detected;
-        gMyColorLocked = YES;
-        updateBoardFlipped();
-        dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Nhận diện từ GameState: %@", gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+    // 3. Dự phòng cho Bot: lấy từ setupModel
+    SEL smSel = NSSelectorFromString(@"setupModel");
+    if ([gs respondsToSelector:smSel]) {
+        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, smSel);
+        if (sm) {
+            detectColorFromSetupModel(sm);
+        }
     }
 }
 
@@ -876,18 +998,28 @@ static void SwizzleInstanceMethod(Class cls, SEL origSel, IMP newImp, IMP *origI
     }
 }
 
-// --- SAFE HOOK DEFINITIONS ---
+// --- SAFE MULTI-CLASS HOOK DEFINITIONS ---
 
+static CFMutableDictionaryRef gOrigLayoutMap = NULL;
 typedef void (*OrigLayout)(id, SEL);
-static OrigLayout gOrig_boardLayout = NULL;
 
 static void hook_BoardLayout(UIView *self, SEL _cmd) {
-    if (gOrig_boardLayout) gOrig_boardLayout(self, _cmd);
+    Class cls = [self class];
+    OrigLayout orig = NULL;
+    if (gOrigLayoutMap) {
+        orig = (OrigLayout)CFDictionaryGetValue(gOrigLayoutMap, (__bridge const void *)(cls));
+    }
+    if (orig) {
+        orig(self, _cmd);
+    }
 
-    // Khi chuyển ván hoặc đổi màn hình bàn cờ
-    if (self != gBoardView) {
-        gBoardView = self;
-        resetForNewGame(@"Phát hiện bàn cờ mới từ giao diện");
+    UIView *targetBoard = findBoardInView(self);
+    if (!targetBoard) targetBoard = self;
+
+    if (targetBoard != gBoardView) {
+        gBoardView = targetBoard;
+        dbg([NSString stringWithFormat:@"[BÀN CỜ ĐƯỢC CHỌN] %@ (%.0fx%.0f)",
+             NSStringFromClass([targetBoard class]), targetBoard.bounds.size.width, targetBoard.bounds.size.height]);
         updateBoardFlipped();
     }
 
@@ -900,10 +1032,75 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
 
     // Chỉ hiển thị mũi tên nếu đang là lượt của người dùng
     if (gCurrentArrows.count && (gMyColor == gTurnColor)) {
-        drawArrows(gCurrentArrows, self, gBoardFlipped, gLastWasThreat);
+        drawArrows(gCurrentArrows, gBoardView, gBoardFlipped, gLastWasThreat);
     } else if (gMyColor != gTurnColor) {
         clearArrows();
     }
+}
+
+static CFMutableDictionaryRef gOrigVCAppearMap = NULL;
+typedef void (*OrigVCAppear)(UIViewController *, SEL, BOOL);
+
+static void hook_VCViewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    Class cls = [self class];
+    OrigVCAppear orig = NULL;
+    if (gOrigVCAppearMap) {
+        orig = (OrigVCAppear)CFDictionaryGetValue(gOrigVCAppearMap, (__bridge const void *)(cls));
+    }
+    if (orig) {
+        orig(self, _cmd, animated);
+    }
+
+    dbg([NSString stringWithFormat:@"[GIAO DIỆN TRẬN ĐẤU] Xuất hiện: %@", NSStringFromClass(cls)]);
+    resetForNewGame([NSString stringWithFormat:@"Bắt đầu giao diện %@", NSStringFromClass(cls)]);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIView *board = findActiveBoardView();
+        if (board) {
+            gBoardView = board;
+            updateBoardFlipped();
+            dbg([NSString stringWithFormat:@"[GIAO DIỆN TRẬN ĐẤU] Đã gắn bàn cờ: %@", NSStringFromClass([board class])]);
+        }
+        if (gLatestGameState) {
+            detectColorFromGameState(gLatestGameState);
+            NSString *fen = extractFenFromGameState(gLatestGameState);
+            if (fen) processFen(fen);
+        }
+    });
+}
+
+static void hookBoardClass(Class cls) {
+    if (!cls) return;
+    SEL sel = @selector(layoutSubviews);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+
+    IMP origImp = method_getImplementation(m);
+    if (!gOrigLayoutMap) {
+        gOrigLayoutMap = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+    }
+    if (!CFDictionaryContainsKey(gOrigLayoutMap, (__bridge const void *)(cls))) {
+        CFDictionarySetValue(gOrigLayoutMap, (__bridge const void *)(cls), (const void *)origImp);
+    }
+
+    class_replaceMethod(cls, sel, (IMP)hook_BoardLayout, method_getTypeEncoding(m));
+}
+
+static void hookVCClass(Class cls) {
+    if (!cls) return;
+    SEL sel = @selector(viewDidAppear:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+
+    IMP origImp = method_getImplementation(m);
+    if (!gOrigVCAppearMap) {
+        gOrigVCAppearMap = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+    }
+    if (!CFDictionaryContainsKey(gOrigVCAppearMap, (__bridge const void *)(cls))) {
+        CFDictionarySetValue(gOrigVCAppearMap, (__bridge const void *)(cls), (const void *)origImp);
+    }
+
+    class_replaceMethod(cls, sel, (IMP)hook_VCViewDidAppear, method_getTypeEncoding(m));
 }
 
 typedef NSString *(*OrigFenString)(id, SEL);
@@ -1013,25 +1210,68 @@ static void installDuolingoHooks(void) {
     }
 
     if (!boardHooked) {
-        NSArray *boardNames = @[@"ChessBoardView", @"_TtC5Chess14ChessBoardView", @"Chess.ChessBoardView", @"StaticChessBoardView"];
-        SEL layoutSel = @selector(layoutSubviews);
+        NSArray *boardNames = @[
+            @"ChessBoardView",
+            @"_TtC5Chess14ChessBoardView",
+            @"Chess.ChessBoardView",
+            @"StaticChessBoardView",
+            @"_TtC14DuolingoMobile20StaticChessBoardView",
+            @"_TtC5Chess21ChessBoardRiveWrapper",
+            @"_TtC14DuolingoMobile19ChessOscarBoardView",
+            @"_TtC14DuolingoMobile14ChessUnityView",
+            @"_TtC14DuolingoMobile24ChessPvPMatchContentView",
+            @"_TtC14DuolingoMobile26ChessPvPMatchContainerView",
+            @"_TtC14DuolingoMobile23ChessMatchContainerView",
+            @"_TtC14DuolingoMobile27ChessMiniMatchContainerView",
+            @"_TtC14DuolingoMobile18ChessChallengeView"
+        ];
         for (NSString *name in boardNames) {
             Class bCls = objc_getClass(name.UTF8String);
             if (bCls) {
-                SwizzleInstanceMethod(bCls, layoutSel, (IMP)hook_BoardLayout, (IMP *)&gOrig_boardLayout);
-                boardHooked = YES;
-                break;
+                hookBoardClass(bCls);
             }
         }
+
+        NSArray *vcNames = @[
+            @"_TtC14DuolingoMobile22ChessPvPMatchContentVC",
+            @"_TtC14DuolingoMobile24ChessPvPMatchContainerVC",
+            @"_TtC14DuolingoMobile23ChessMatchRiveContentVC",
+            @"_TtC14DuolingoMobile24ChessMatchUnityContentVC",
+            @"_TtC14DuolingoMobile21ChessMatchContainerVC",
+            @"_TtC14DuolingoMobile25ChessMiniMatchContainerVC"
+        ];
+        for (NSString *name in vcNames) {
+            Class vcCls = objc_getClass(name.UTF8String);
+            if (vcCls) {
+                hookVCClass(vcCls);
+            }
+        }
+        boardHooked = YES;
     }
 
-    // Periodic match cleanup timer
-    [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
-        if (gBoardView && (!gBoardView.window || gBoardView.hidden || gBoardView.alpha < 0.1)) {
-            gBoardView = nil;
-            resetForNewGame(@"Bàn cờ đã rời khỏi màn hình");
-        }
-    }];
+    // Periodic match check and active board lookup
+    static BOOL timerStarted = NO;
+    if (!timerStarted) {
+        timerStarted = YES;
+        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+            if (!gBoardView || !gBoardView.window || gBoardView.hidden || gBoardView.alpha < 0.1) {
+                UIView *found = findActiveBoardView();
+                if (found) {
+                    if (found != gBoardView) {
+                        gBoardView = found;
+                        updateBoardFlipped();
+                        dbg([NSString stringWithFormat:@"[TÌM THẤY BÀN CỜ TỰ ĐỘNG] %@", NSStringFromClass([found class])]);
+                    }
+                    if (gCurrentArrows.count && (gMyColor == gTurnColor)) {
+                        drawArrows(gCurrentArrows, gBoardView, gBoardFlipped, gLastWasThreat);
+                    }
+                } else if (gBoardView) {
+                    gBoardView = nil;
+                    resetForNewGame(@"Bàn cờ đã rời khỏi màn hình");
+                }
+            }
+        }];
+    }
 }
 
 // --- SETTINGS PANEL (VIETNAMESE UI) ---
@@ -1475,6 +1715,11 @@ static void installDuolingoHooks(void) {
     id gs = gLatestGameState;
     resetForNewGame(@"Người dùng bấm làm mới ván cờ");
     showToast(@"🔄 Đã làm mới! Đang nhận diện lại bàn cờ...");
+    UIView *board = findActiveBoardView();
+    if (board) {
+        gBoardView = board;
+        updateBoardFlipped();
+    }
     if (gs) {
         gLatestGameState = gs;
         detectColorFromGameState(gs);
