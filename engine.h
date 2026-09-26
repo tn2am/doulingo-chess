@@ -17,6 +17,8 @@ void EngineStart(void);
 
 void EngineGo(const char *fen, int depth, int elo, int multipv, EngineResultBlock done);
 
+void EngineStop(void);
+
 int StockfishLegalMoves(const char *fen, char *out, int maxMoves);
 
 bool StockfishFenLegal(const char *fen);

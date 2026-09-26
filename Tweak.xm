@@ -51,6 +51,7 @@ static NSInteger gFlipMode             = 0;   // 0 = Auto, 1 = Force White botto
 // --- STATE VARIABLES ---
 static NSString *gCurrentFen     = nil;
 static NSString *gLastEvalFen    = nil;
+static NSString *gEvaluatingFen  = nil;
 static NSString *gLastAutoPlayed = nil;
 static __weak UIView *gBoardView = nil;
 
@@ -58,6 +59,9 @@ static __weak UIView *gBoardView = nil;
 static NSInteger gMyColor        = 0;
 static NSInteger gTurnColor      = 0;
 static BOOL      gBoardFlipped   = NO;
+static BOOL      gMyColorLocked  = NO;
+static __weak id gLastSetupModel = nil;
+
 
 static NSMutableArray *gArrowLayers = nil;
 static NSArray        *gCurrentArrows = nil;
@@ -175,13 +179,16 @@ static void processFen(NSString *fen);
 // Reset clean state for a new game / opponent match
 static void resetForNewGame(NSString *reason) {
     dbg([NSString stringWithFormat:@"[VÁN MỚI] %@ -> Đặt lại toàn bộ dữ liệu bàn cờ.", reason]);
+    EngineStop();
     gCurrentFen = nil;
     gLastEvalFen = nil;
+    gEvaluatingFen = nil;
     gLastAutoPlayed = nil;
     gBestMoveStr = nil;
     gBestEvalStr = nil;
     gLastWasThreat = NO;
     gLatestGameState = nil;
+    gMyColorLocked = NO;
     clearArrows();
 }
 
@@ -545,16 +552,15 @@ static void processFen(NSString *fen) {
         cleanFen = [NSString stringWithFormat:@"%@ - - 0 1", cleanFen];
     }
 
-    // Tự động nhận diện ván cờ mới nếu FEN quay lại vị trí xuất phát
+    // Tự động nhận diện ván cờ mới nếu FEN quay lại vị trí xuất phát chuẩn
     if ([cleanFen hasPrefix:@"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"]) {
-        dbg(@"[VÁN MỚI] Phát hiện bàn cờ xuất phát chuẩn -> Tự động đặt lại dữ liệu ván đấu.");
-        gLastAutoPlayed = nil;
-        gLastEvalFen = nil;
-        clearArrows();
+        if (gCurrentFen && ![gCurrentFen hasPrefix:@"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"]) {
+            resetForNewGame(@"Phát hiện bàn cờ xuất phát chuẩn ván mới");
+        }
     }
 
     // Nếu FEN không đổi và đã đánh giá xong thì không cần xử lý lại
-    if ([cleanFen isEqualToString:gCurrentFen] && [cleanFen isEqualToString:gLastEvalFen]) {
+    if ([cleanFen isEqualToString:gCurrentFen] && [cleanFen isEqualToString:gLastEvalFen] && gCurrentArrows.count > 0) {
         return;
     }
 
@@ -568,27 +574,49 @@ static void processFen(NSString *fen) {
 
 static void fetchMove(NSString *fen) {
     if (!gEnabled || !fen.length) return;
-    if ([fen isEqualToString:gLastEvalFen] && gCurrentArrows.count) return;
 
-    gLastEvalFen = [fen copy];
     parseFEN(fen);
 
     BOOL isOurTurn = (gMyColor == gTurnColor);
 
-    // Tuyệt đối không hiện nước đi của đối thủ theo yêu cầu
+    // 1. NẾU LÀ LƯỢT ĐỐI THỦ:
     if (!isOurTurn) {
-        clearArrows();
+        EngineStop();          // DỪNG NGAY MỌI TÍNH TOÁN CŨ ĐỂ TIẾT KIỆM TÀI NGUYÊN
+        clearArrows();         // XÓA SẠCH MŨI TÊN (KHÔNG HIỆN NƯỚC ĐỐI THỦ!)
         gBestMoveStr = nil;
         gBestEvalStr = @"⏳ Đang chờ đối thủ đi...";
+        gEvaluatingFen = nil;
+        dbg([NSString stringWithFormat:@"[LƯỢT ĐỐI THỦ] Đã xóa mũi tên và dừng engine (Bạn: %@, Lượt FEN: %@)",
+             gMyColor == 0 ? @"Trắng" : @"Đen", gTurnColor == 0 ? @"Trắng" : @"Đen"]);
         return;
     }
 
-    dbg([NSString stringWithFormat:@"Tính toán nước đi cho BẠN: %@", fen]);
+    // 2. NẾU LÀ LƯỢT CỦA BẠN:
+    // Nếu FEN này đang được tính toán dở, không kích hoạt lại trùng lặp
+    if ([fen isEqualToString:gEvaluatingFen]) {
+        return;
+    }
+
+    // Nếu FEN này đã được đánh giá xong và đang có mũi tên hiển thị rồi thì giữ nguyên
+    if ([fen isEqualToString:gLastEvalFen] && gCurrentArrows.count > 0) {
+        return;
+    }
+
+    gEvaluatingFen = [fen copy];
+    dbg([NSString stringWithFormat:@"[LƯỢT CỦA BẠN] Bắt đầu tính toán cho %@: %@",
+         gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫", fen]);
 
     if (gUseMaia && MaiaAvailable()) {
         MaiaGo([fen UTF8String], (int)gElo, (int)gElo, ^(MaiaResult res) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!res.ok) return;
+                if (!res.ok) {
+                    gEvaluatingFen = nil;
+                    return;
+                }
+                if (![fen isEqualToString:gCurrentFen]) return;
+
+                gLastEvalFen = [fen copy];
+                gEvaluatingFen = nil;
 
                 NSString *mv = [NSString stringWithUTF8String:res.move];
                 gBestMoveStr = [mv copy];
@@ -601,7 +629,7 @@ static void fetchMove(NSString *fen) {
                     @"label": gBestEvalStr,
                     @"rank": @0
                 };
-                if (gBoardView) {
+                if (gBoardView && (gMyColor == gTurnColor)) {
                     drawArrows(@[arrow], gBoardView, gBoardFlipped, NO);
                     if (gAutoPlay && ![gLastAutoPlayed isEqualToString:fen]) {
                         gLastAutoPlayed = [fen copy];
@@ -618,7 +646,14 @@ static void fetchMove(NSString *fen) {
 
     EngineGo([fen UTF8String], depth, (int)gElo, multipv, ^(const EngineLine *lines, int count) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (count <= 0) return;
+            if (count <= 0) {
+                gEvaluatingFen = nil;
+                return;
+            }
+            if (![fen isEqualToString:gCurrentFen]) return;
+
+            gLastEvalFen = [fen copy];
+            gEvaluatingFen = nil;
 
             gLastWasThreat = NO;
             NSMutableArray *arrows = [NSMutableArray array];
@@ -643,7 +678,7 @@ static void fetchMove(NSString *fen) {
                 }];
             }
 
-            if (gBoardView) {
+            if (gBoardView && (gMyColor == gTurnColor)) {
                 drawArrows(arrows, gBoardView, gBoardFlipped, NO);
 
                 // AutoPlay logic
@@ -692,55 +727,79 @@ static NSInteger detectColorValue(id obj) {
     return -1;
 }
 
-// Nhận diện màu quân và chiều bàn cờ chính xác tuyệt đối qua KMP userMovesNext
-static void updateOrientationFromSetupModel(id sm, NSString *fen) {
-    if (!sm) return;
-    SEL umnSel = NSSelectorFromString(@"userMovesNext");
-    if ([sm respondsToSelector:umnSel]) {
-        BOOL umn = ((BOOL (*)(id, SEL))objc_msgSend)(sm, umnSel);
-        BOOL isWhiteToMove = YES;
-        if (fen.length > 10) {
-            NSArray *parts = [fen componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-            if (parts.count > 1) {
-                isWhiteToMove = ![parts[1] isEqualToString:@"b"];
-            }
-        }
-        // Công thức:
-        // Nếu FEN là lượt Trắng:
-        //   userMovesNext == YES -> BẠN LÀ TRẮNG (0)
-        //   userMovesNext == NO  -> BẠN LÀ ĐEN (1)
-        // Nếu FEN là lượt Đen:
-        //   userMovesNext == YES -> BẠN LÀ ĐEN (1)
-        //   userMovesNext == NO  -> BẠN LÀ TRẮNG (0)
-        NSInteger detected = isWhiteToMove ? (umn ? 0 : 1) : (umn ? 1 : 0);
-        if (gMyColor != detected) {
-            gMyColor = detected;
-            dbg([NSString stringWithFormat:@"[NHẬN DIỆN MÀU CỜ] Bạn là: %@ (Lượt FEN: %@, userMovesNext: %d)",
-                 gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫", isWhiteToMove ? @"Trắng" : @"Đen", (int)umn]);
+static BOOL isBoardViewFlipped(UIView *board) {
+    if (!board) return NO;
+    NSArray *flipSelectors = @[@"isFlipped", @"flipped", @"isReversed", @"reversed", @"isRotated", @"rotated"];
+    for (NSString *selName in flipSelectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([board respondsToSelector:sel]) {
+            return ((BOOL (*)(id, SEL))objc_msgSend)(board, sel);
         }
     }
+    return NO;
+}
 
+static void updateBoardFlipped(void) {
     if (gFlipMode == 1) {
         gBoardFlipped = NO; // Ép Trắng ở dưới
     } else if (gFlipMode == 2) {
         gBoardFlipped = YES; // Ép Đen ở dưới
     } else {
-        // Tự động: Người chơi cầm quân Đen thì bàn cờ lật ngược
+        if (gBoardView && isBoardViewFlipped(gBoardView)) {
+            gBoardFlipped = YES;
+            return;
+        }
         gBoardFlipped = (gMyColor == 1);
     }
 }
 
-// Update orientation & player color from GameState
-static void updateOrientationFromGameState(id gs) {
-    if (!gs) return;
+// Nhận diện và KHÓA CỨNG màu quân cho người chơi từ setupModel ban đầu
+static void detectColorFromSetupModel(id sm) {
+    if (!sm || gMyColorLocked) return;
+    SEL umnSel = NSSelectorFromString(@"userMovesNext");
+    if (![sm respondsToSelector:umnSel]) return;
+
+    BOOL umn = ((BOOL (*)(id, SEL))objc_msgSend)(sm, umnSel);
+
+    // Lấy FEN ban đầu của chính setupModel, tuyệt đối KHÔNG dùng live FEN!
+    NSString *initFen = nil;
+    SEL fnSel = NSSelectorFromString(@"fenNotation");
+    if ([sm respondsToSelector:fnSel]) {
+        initFen = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
+    }
+
+    BOOL isWhiteFirst = YES;
+    if (initFen && initFen.length > 10) {
+        NSArray *parts = [initFen componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (parts.count > 1) {
+            isWhiteFirst = ![parts[1] isEqualToString:@"b"];
+        }
+    }
+
+    // Nếu ở thế cờ ban đầu lượt đi là Trắng:
+    //   userMovesNext == YES -> Bạn cầm Trắng (0)
+    //   userMovesNext == NO  -> Bạn cầm Đen (1)
+    // Nếu ở thế cờ ban đầu lượt đi là Đen:
+    //   userMovesNext == YES -> Bạn cầm Đen (1)
+    //   userMovesNext == NO  -> Bạn cầm Trắng (0)
+    NSInteger detected = isWhiteFirst ? (umn ? 0 : 1) : (umn ? 1 : 0);
+    gMyColor = detected;
+    gMyColorLocked = YES;
+    updateBoardFlipped();
+
+    dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Bạn là: %@ (Setup userMovesNext=%d, isWhiteFirst=%d, initFen=%@)",
+         gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫", (int)umn, (int)isWhiteFirst, initFen]);
+}
+
+static void detectColorFromGameState(id gs) {
+    if (!gs || gMyColorLocked) return;
+
     SEL smSel = NSSelectorFromString(@"setupModel");
     if ([gs respondsToSelector:smSel]) {
         id sm = ((id (*)(id, SEL))objc_msgSend)(gs, smSel);
         if (sm) {
-            SEL fnSel = NSSelectorFromString(@"fenNotation");
-            NSString *fn = [sm respondsToSelector:fnSel] ? ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel) : gCurrentFen;
-            updateOrientationFromSetupModel(sm, fn ?: gCurrentFen);
-            return;
+            detectColorFromSetupModel(sm);
+            if (gMyColorLocked) return;
         }
     }
 
@@ -757,30 +816,16 @@ static void updateOrientationFromGameState(id gs) {
 
     if (detected >= 0) {
         gMyColor = detected;
+        gMyColorLocked = YES;
+        updateBoardFlipped();
+        dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Nhận diện từ GameState: %@", gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
     }
-
-    if (gFlipMode == 1) gBoardFlipped = NO;
-    else if (gFlipMode == 2) gBoardFlipped = YES;
-    else gBoardFlipped = (gMyColor == 1);
 }
 
 static NSString *extractFenFromGameState(id gs) {
     if (!gs) return nil;
-    SEL setupSel = NSSelectorFromString(@"setupModel");
-    if ([gs respondsToSelector:setupSel]) {
-        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
-        if (sm) {
-            SEL fnSel = NSSelectorFromString(@"fenNotation");
-            if ([sm respondsToSelector:fnSel]) {
-                NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
-                if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
-                    updateOrientationFromSetupModel(sm, fn);
-                    return fn;
-                }
-            }
-        }
-    }
 
+    // 1. Luôn ưu tiên FEN live trực tiếp từ GameState.fen.fenString
     SEL fenSel = NSSelectorFromString(@"fen");
     if ([gs respondsToSelector:fenSel]) {
         id fenObj = ((id (*)(id, SEL))objc_msgSend)(gs, fenSel);
@@ -789,8 +834,24 @@ static NSString *extractFenFromGameState(id gs) {
             if ([fenObj respondsToSelector:fenStrSel]) {
                 NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fenStrSel);
                 if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
-                    updateOrientationFromGameState(gs);
+                    if (!gMyColorLocked) detectColorFromGameState(gs);
                     return fs;
+                }
+            }
+        }
+    }
+
+    // 2. Dự phòng: lấy FEN ban đầu từ setupModel
+    SEL setupSel = NSSelectorFromString(@"setupModel");
+    if ([gs respondsToSelector:setupSel]) {
+        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
+        if (sm) {
+            detectColorFromSetupModel(sm);
+            SEL fnSel = NSSelectorFromString(@"fenNotation");
+            if ([sm respondsToSelector:fnSel]) {
+                NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
+                if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
+                    return fn;
                 }
             }
         }
@@ -827,6 +888,7 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
     if (self != gBoardView) {
         gBoardView = self;
         resetForNewGame(@"Phát hiện bàn cờ mới từ giao diện");
+        updateBoardFlipped();
     }
 
     if (gLatestGameState) {
@@ -839,6 +901,8 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
     // Chỉ hiển thị mũi tên nếu đang là lượt của người dùng
     if (gCurrentArrows.count && (gMyColor == gTurnColor)) {
         drawArrows(gCurrentArrows, self, gBoardFlipped, gLastWasThreat);
+    } else if (gMyColor != gTurnColor) {
+        clearArrows();
     }
 }
 
@@ -848,6 +912,9 @@ static OrigFenString gOrig_fenString = NULL;
 static NSString *hook_FenString(id self, SEL _cmd) {
     NSString *res = gOrig_fenString ? gOrig_fenString(self, _cmd) : nil;
     if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
+        if (!gMyColorLocked && gLatestGameState) {
+            detectColorFromGameState(gLatestGameState);
+        }
         processFen(res);
     }
     return res;
@@ -860,7 +927,9 @@ static id hook_GameStateFen(id self, SEL _cmd) {
     if (self != gLatestGameState) {
         gLatestGameState = self;
     }
-    updateOrientationFromGameState(self);
+    if (!gMyColorLocked) {
+        detectColorFromGameState(self);
+    }
 
     id fenObj = gOrig_gameStateFen ? gOrig_gameStateFen(self, _cmd) : nil;
     if (fenObj) {
@@ -884,14 +953,11 @@ static id hook_GameStateSetupModel(id self, SEL _cmd) {
     }
     id sm = gOrig_gameStateSetupModel ? gOrig_gameStateSetupModel(self, _cmd) : nil;
     if (sm) {
-        SEL fnSel = NSSelectorFromString(@"fenNotation");
-        if ([sm respondsToSelector:fnSel]) {
-            NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
-            if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
-                updateOrientationFromSetupModel(sm, fn);
-                processFen(fn);
-            }
+        if (sm != gLastSetupModel) {
+            gLastSetupModel = sm;
+            resetForNewGame(@"Phát hiện GameSetupModel ván mới");
         }
+        detectColorFromSetupModel(sm);
     }
     return sm;
 }
@@ -902,8 +968,15 @@ static OrigFenNotation gOrig_setupModelFenNotation = NULL;
 static NSString *hook_FenNotation(id self, SEL _cmd) {
     NSString *res = gOrig_setupModelFenNotation ? gOrig_setupModelFenNotation(self, _cmd) : nil;
     if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
-        updateOrientationFromSetupModel(self, res);
-        processFen(res);
+        if (self != gLastSetupModel) {
+            gLastSetupModel = self;
+            resetForNewGame(@"Phát hiện GameSetupModel.fenNotation ván mới");
+        }
+        detectColorFromSetupModel(self);
+        // Nếu vừa bắt đầu ván mới và chưa có live FEN nào thì kích hoạt ván cờ
+        if (!gCurrentFen) {
+            processFen(res);
+        }
     }
     return res;
 }
@@ -1282,9 +1355,7 @@ static void installDuolingoHooks(void) {
 
 - (void)flipSegChanged:(UISegmentedControl *)s {
     gFlipMode = s.selectedSegmentIndex;
-    if (gFlipMode == 1) gBoardFlipped = NO;
-    else if (gFlipMode == 2) gBoardFlipped = YES;
-    else gBoardFlipped = (gMyColor == 1);
+    updateBoardFlipped();
     savePrefs();
     if (gCurrentArrows.count && gBoardView) {
         drawArrows(gCurrentArrows, gBoardView, gBoardFlipped, gLastWasThreat);
@@ -1377,9 +1448,12 @@ static void installDuolingoHooks(void) {
 
 - (void)colorSegChanged:(UISegmentedControl *)s {
     gMyColor = s.selectedSegmentIndex;
-    if (gFlipMode == 0) gBoardFlipped = (gMyColor == 1);
+    gMyColorLocked = YES;
+    updateBoardFlipped();
     savePrefs();
     showToast(gMyColor == 0 ? @"⚪ Đã chọn: Bạn là quân Trắng (Đi trước)" : @"⚫ Đã chọn: Bạn là quân Đen (Đi sau)");
+    gLastEvalFen = nil;
+    gEvaluatingFen = nil;
     if (gCurrentFen) processFen(gCurrentFen);
     [self populate];
 }
@@ -1392,6 +1466,8 @@ static void installDuolingoHooks(void) {
     savePrefs();
     showToast(@"👑 Đã bật Siêu Máy Tính (Stockfish 18 NNUE Max)");
     [self populate];
+    gLastEvalFen = nil;
+    gEvaluatingFen = nil;
     if (gCurrentFen) processFen(gCurrentFen);
 }
 
@@ -1401,9 +1477,11 @@ static void installDuolingoHooks(void) {
     showToast(@"🔄 Đã làm mới! Đang nhận diện lại bàn cờ...");
     if (gs) {
         gLatestGameState = gs;
-        updateOrientationFromGameState(gs);
+        detectColorFromGameState(gs);
         NSString *fen = extractFenFromGameState(gs);
         if (fen) processFen(fen);
+    } else if (gCurrentFen) {
+        processFen(gCurrentFen);
     }
     [self populate];
 }

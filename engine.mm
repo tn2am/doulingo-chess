@@ -254,6 +254,16 @@ extern "C" void EngineGo(const char *fen, int depth, int elo, int multipv, Engin
     }
 }
 
+extern "C" void EngineStop(void) {
+    std::lock_guard<std::mutex> lk(gReqMutex);
+    gQueue.clear();
+    gPending = nil;
+    if (gBusy) {
+        gIn.push("stop\n");
+    }
+}
+
+
 extern "C" bool StockfishFenLegal(const char *fen) {
     EngineStart();
     for (int i = 0; i < 500 && !gEngineReady.load(); i++)
