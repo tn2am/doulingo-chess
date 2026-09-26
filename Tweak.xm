@@ -27,7 +27,7 @@
 #define PREF_THREATS     @"DuoChess_ShowThreats"
 #define PREF_FLIPMODE    @"DuoChess_FlipMode"
 
-#define DEFAULT_ELO      1200
+#define DEFAULT_ELO      2600
 
 // --- GLOBAL PREFERENCES ---
 static NSInteger gElo                  = DEFAULT_ELO;
@@ -154,7 +154,7 @@ static NSString *eloTierName(NSInteger elo) {
     if (elo <= 1800) return @"Trung cấp";
     if (elo <= 2200) return @"Cao cấp";
     if (elo <= 2600) return @"Kiện tướng (Master)";
-    return @"Đại kiện tướng (GM)";
+    return @"Đại kiện tướng (GM 3000 ELO)";
 }
 
 // Depth mapping for high-intelligence Grandmaster analysis
@@ -181,8 +181,10 @@ static void resetForNewGame(NSString *reason) {
     gBestMoveStr = nil;
     gBestEvalStr = nil;
     gLastWasThreat = NO;
+    gLatestGameState = nil;
     clearArrows();
 }
+
 
 // --- FEN PARSER ---
 static void parseFEN(NSString *fen) {
@@ -400,33 +402,69 @@ static void showToast(NSString *text) {
     });
 }
 
-// --- AUTOPLAY TOUCH & DRAG SIMULATION ---
+// --- AUTOPLAY TOUCH SIMULATION ---
+static NSMutableArray *gFakeTouches = nil;
+static UITouch *chAcquireFakeTouch(void) {
+    if (!gFakeTouches) gFakeTouches = [NSMutableArray array];
+    UITouch *t = gFakeTouches.firstObject;
+    if (!t) {
+        t = [[UITouch alloc] init];
+        [gFakeTouches addObject:t];
+    }
+    return t;
+}
+
+static void chSetKvc(id obj, NSString *key, id val) {
+    @try {
+        [obj setValue:val forKey:key];
+    } @catch (NSException *e) {}
+}
+
 static void chFakeTouchFire(CGPoint ptInWin, UIWindow *win, UITouchPhase phase) {
     if (!win) return;
     @try {
-        UITouch *touch = [[UITouch alloc] init];
-        [touch setValue:@(phase) forKey:@"_phase"];
-        [touch setValue:[NSValue valueWithCGPoint:ptInWin] forKey:@"_locationInWindow"];
-        [touch setValue:@1 forKey:@"_tapCount"];
-        [touch setValue:@(NSDate.date.timeIntervalSince1970) forKey:@"_timestamp"];
-        [touch setValue:win forKey:@"_window"];
+        UITouch *touch = chAcquireFakeTouch();
+        chSetKvc(touch, @"_phase", @(phase));
+        chSetKvc(touch, @"_locationInWindow", [NSValue valueWithCGPoint:ptInWin]);
+        chSetKvc(touch, @"_tapCount", @1);
+        chSetKvc(touch, @"_timestamp", @(NSDate.date.timeIntervalSince1970));
+        chSetKvc(touch, @"_window", win);
 
         UIView *target = [win hitTest:ptInWin withEvent:nil] ?: win;
-        [touch setValue:target forKey:@"_view"];
+        chSetKvc(touch, @"_view", target);
 
         static UIEvent *sCarrierEvent = nil;
         static dispatch_once_t once;
         dispatch_once(&once, ^{ sCarrierEvent = [[UIEvent alloc] init]; });
 
         NSSet *touches = [NSSet setWithObject:touch];
-        if (phase == UITouchPhaseBegan) {
-            [target touchesBegan:touches withEvent:sCarrierEvent];
-        } else if (phase == UITouchPhaseMoved) {
-            [target touchesMoved:touches withEvent:sCarrierEvent];
-        } else if (phase == UITouchPhaseCancelled) {
-            [target touchesCancelled:touches withEvent:sCarrierEvent];
-        } else {
-            [target touchesEnded:touches withEvent:sCarrierEvent];
+        switch (phase) {
+            case UITouchPhaseBegan:
+                [target touchesBegan:touches withEvent:sCarrierEvent];
+                break;
+            case UITouchPhaseMoved:
+                [target touchesMoved:touches withEvent:sCarrierEvent];
+                break;
+            case UITouchPhaseCancelled:
+                [target touchesCancelled:touches withEvent:sCarrierEvent];
+                break;
+            default:
+                [target touchesEnded:touches withEvent:sCarrierEvent];
+                break;
+        }
+
+        // Chuyển tiếp sự kiện chạm tới toàn bộ Gesture Recognizers trong phân cấp View
+        UIView *v = target;
+        while (v && v != win) {
+            for (UIGestureRecognizer *gr in v.gestureRecognizers) {
+                @try {
+                    if (phase == UITouchPhaseBegan) [gr touchesBegan:touches withEvent:sCarrierEvent];
+                    else if (phase == UITouchPhaseMoved) [gr touchesMoved:touches withEvent:sCarrierEvent];
+                    else if (phase == UITouchPhaseCancelled) [gr touchesCancelled:touches withEvent:sCarrierEvent];
+                    else [gr touchesEnded:touches withEvent:sCarrierEvent];
+                } @catch (NSException *e) {}
+            }
+            v = v.superview;
         }
     } @catch (NSException *e) {
         dbg([NSString stringWithFormat:@"Lỗi giả lập chạm: %@", e.reason]);
@@ -446,36 +484,46 @@ static void performAutoPlay(NSString *moveUCI, UIView *board) {
     CGPoint fromWin = CGPointMake(winRect.origin.x + fromLocal.x, winRect.origin.y + fromLocal.y);
     CGPoint toWin   = CGPointMake(winRect.origin.x + toLocal.x,   winRect.origin.y + toLocal.y);
 
+    BOOL promo = moveUCI.length > 4;
+    CGPoint promoWin = CGPointZero;
+    if (promo) {
+        int qSq = (gMyColor == 1) ? toSq + 8 : toSq - 8;
+        if (qSq < 0 || qSq > 63) qSq = toSq;
+        CGPoint qLocal = squareToPoint(qSq, board.bounds, gBoardFlipped);
+        promoWin = CGPointMake(winRect.origin.x + qLocal.x, winRect.origin.y + qLocal.y);
+    }
+
     double delay = gAutoPlayDelay;
     if (gAutoPlayJitterEnabled && gAutoPlayJitterRange > 0.0) {
         double jit = ((double)arc4random_uniform(2001) / 1000.0 - 1.0) * gAutoPlayJitterRange;
         delay = MAX(0.1, delay + jit);
     }
 
+    dbg([NSString stringWithFormat:@"[TỰ ĐỘNG ĐI] %@ (từ ô %d sang ô %d, trễ: %.2fs)", moveUCI, fromSq, toSq, delay]);
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // 1. Chạm vào ô bắt đầu
+        if (!gAutoPlay || !gEnabled || !board.window) return;
+
+        // Bước 1: Chạm chọn quân cờ (Tap-to-select)
         chFakeTouchFire(fromWin, win, UITouchPhaseBegan);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            chFakeTouchFire(fromWin, win, UITouchPhaseEnded);
 
-        // 2. Kéo nhẹ tới trung điểm
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            CGPoint midWin = CGPointMake((fromWin.x + toWin.x) / 2.0, (fromWin.y + toWin.y) / 2.0);
-            chFakeTouchFire(midWin, win, UITouchPhaseMoved);
-
-            // 3. Kéo tới ô đích
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                chFakeTouchFire(toWin, win, UITouchPhaseMoved);
-
-                // 4. Nhả tay tại ô đích
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Bước 2: Chờ Duolingo hiển thị các ô hợp lệ (0.09s), sau đó chạm ô đích (Tap-to-move)
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.09 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                chFakeTouchFire(toWin, win, UITouchPhaseBegan);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     chFakeTouchFire(toWin, win, UITouchPhaseEnded);
 
-                    // 5. Dự phòng tap-to-move cho giao diện nhận tap
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        chFakeTouchFire(toWin, win, UITouchPhaseBegan);
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            chFakeTouchFire(toWin, win, UITouchPhaseEnded);
+                    // Bước 3: Nếu là nước phong cấp (Promotion)
+                    if (promo) {
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            chFakeTouchFire(promoWin, win, UITouchPhaseBegan);
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                chFakeTouchFire(promoWin, win, UITouchPhaseEnded);
+                            });
                         });
-                    });
+                    }
                 });
             });
         });
@@ -497,11 +545,17 @@ static void processFen(NSString *fen) {
         cleanFen = [NSString stringWithFormat:@"%@ - - 0 1", cleanFen];
     }
 
-    // New match check: if starting board appeared, reset previous match state
+    // Tự động nhận diện ván cờ mới nếu FEN quay lại vị trí xuất phát
     if ([cleanFen hasPrefix:@"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"]) {
+        dbg(@"[VÁN MỚI] Phát hiện bàn cờ xuất phát chuẩn -> Tự động đặt lại dữ liệu ván đấu.");
         gLastAutoPlayed = nil;
         gLastEvalFen = nil;
         clearArrows();
+    }
+
+    // Nếu FEN không đổi và đã đánh giá xong thì không cần xử lý lại
+    if ([cleanFen isEqualToString:gCurrentFen] && [cleanFen isEqualToString:gLastEvalFen]) {
+        return;
     }
 
     gCurrentFen = [cleanFen copy];
@@ -638,9 +692,58 @@ static NSInteger detectColorValue(id obj) {
     return -1;
 }
 
-// Update orientation & player color from userColor
+// Nhận diện màu quân và chiều bàn cờ chính xác tuyệt đối qua KMP userMovesNext
+static void updateOrientationFromSetupModel(id sm, NSString *fen) {
+    if (!sm) return;
+    SEL umnSel = NSSelectorFromString(@"userMovesNext");
+    if ([sm respondsToSelector:umnSel]) {
+        BOOL umn = ((BOOL (*)(id, SEL))objc_msgSend)(sm, umnSel);
+        BOOL isWhiteToMove = YES;
+        if (fen.length > 10) {
+            NSArray *parts = [fen componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (parts.count > 1) {
+                isWhiteToMove = ![parts[1] isEqualToString:@"b"];
+            }
+        }
+        // Công thức:
+        // Nếu FEN là lượt Trắng:
+        //   userMovesNext == YES -> BẠN LÀ TRẮNG (0)
+        //   userMovesNext == NO  -> BẠN LÀ ĐEN (1)
+        // Nếu FEN là lượt Đen:
+        //   userMovesNext == YES -> BẠN LÀ ĐEN (1)
+        //   userMovesNext == NO  -> BẠN LÀ TRẮNG (0)
+        NSInteger detected = isWhiteToMove ? (umn ? 0 : 1) : (umn ? 1 : 0);
+        if (gMyColor != detected) {
+            gMyColor = detected;
+            dbg([NSString stringWithFormat:@"[NHẬN DIỆN MÀU CỜ] Bạn là: %@ (Lượt FEN: %@, userMovesNext: %d)",
+                 gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫", isWhiteToMove ? @"Trắng" : @"Đen", (int)umn]);
+        }
+    }
+
+    if (gFlipMode == 1) {
+        gBoardFlipped = NO; // Ép Trắng ở dưới
+    } else if (gFlipMode == 2) {
+        gBoardFlipped = YES; // Ép Đen ở dưới
+    } else {
+        // Tự động: Người chơi cầm quân Đen thì bàn cờ lật ngược
+        gBoardFlipped = (gMyColor == 1);
+    }
+}
+
+// Update orientation & player color from GameState
 static void updateOrientationFromGameState(id gs) {
     if (!gs) return;
+    SEL smSel = NSSelectorFromString(@"setupModel");
+    if ([gs respondsToSelector:smSel]) {
+        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, smSel);
+        if (sm) {
+            SEL fnSel = NSSelectorFromString(@"fenNotation");
+            NSString *fn = [sm respondsToSelector:fnSel] ? ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel) : gCurrentFen;
+            updateOrientationFromSetupModel(sm, fn ?: gCurrentFen);
+            return;
+        }
+    }
+
     NSInteger detected = -1;
     NSArray *colorSelectors = @[@"userColor", @"playerColor", @"myColor", @"humanColor", @"side"];
     for (NSString *sName in colorSelectors) {
@@ -652,54 +755,31 @@ static void updateOrientationFromGameState(id gs) {
         }
     }
 
-    if (detected < 0) {
-        SEL smSel = NSSelectorFromString(@"setupModel");
-        if ([gs respondsToSelector:smSel]) {
-            id sm = ((id (*)(id, SEL))objc_msgSend)(gs, smSel);
-            if (sm) {
-                for (NSString *sName in colorSelectors) {
-                    SEL s = NSSelectorFromString(sName);
-                    if ([sm respondsToSelector:s]) {
-                        id uc = ((id (*)(id, SEL))objc_msgSend)(sm, s);
-                        detected = detectColorValue(uc);
-                        if (detected >= 0) break;
-                    }
-                }
-            }
-        }
-    }
-
-    if (detected < 0) {
-        // Kiểm tra trực tiếp trên GameState xem có lượt người chơi không
-        NSArray *userTurnSels = @[@"isUserTurn", @"userTurn", @"isMyTurn", @"myTurn", @"isHumanTurn"];
-        for (NSString *tName in userTurnSels) {
-            SEL ts = NSSelectorFromString(tName);
-            if ([gs respondsToSelector:ts]) {
-                BOOL isUser = ((BOOL (*)(id, SEL))objc_msgSend)(gs, ts);
-                if (isUser && gCurrentFen.length > 10) {
-                    detected = gTurnColor;
-                    break;
-                }
-            }
-        }
-    }
-
     if (detected >= 0) {
         gMyColor = detected;
     }
 
-    if (gFlipMode == 1) {
-        gBoardFlipped = NO; // Force White bottom
-    } else if (gFlipMode == 2) {
-        gBoardFlipped = YES; // Force Black bottom
-    } else {
-        gBoardFlipped = (gMyColor == 1);
-    }
+    if (gFlipMode == 1) gBoardFlipped = NO;
+    else if (gFlipMode == 2) gBoardFlipped = YES;
+    else gBoardFlipped = (gMyColor == 1);
 }
 
 static NSString *extractFenFromGameState(id gs) {
     if (!gs) return nil;
-    updateOrientationFromGameState(gs);
+    SEL setupSel = NSSelectorFromString(@"setupModel");
+    if ([gs respondsToSelector:setupSel]) {
+        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
+        if (sm) {
+            SEL fnSel = NSSelectorFromString(@"fenNotation");
+            if ([sm respondsToSelector:fnSel]) {
+                NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
+                if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
+                    updateOrientationFromSetupModel(sm, fn);
+                    return fn;
+                }
+            }
+        }
+    }
 
     SEL fenSel = NSSelectorFromString(@"fen");
     if ([gs respondsToSelector:fenSel]) {
@@ -709,21 +789,8 @@ static NSString *extractFenFromGameState(id gs) {
             if ([fenObj respondsToSelector:fenStrSel]) {
                 NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fenStrSel);
                 if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
+                    updateOrientationFromGameState(gs);
                     return fs;
-                }
-            }
-        }
-    }
-
-    SEL setupSel = NSSelectorFromString(@"setupModel");
-    if ([gs respondsToSelector:setupSel]) {
-        id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
-        if (sm) {
-            SEL fnSel = NSSelectorFromString(@"fenNotation");
-            if ([sm respondsToSelector:fnSel]) {
-                NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
-                if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
-                    return fn;
                 }
             }
         }
@@ -756,7 +823,7 @@ static OrigLayout gOrig_boardLayout = NULL;
 static void hook_BoardLayout(UIView *self, SEL _cmd) {
     if (gOrig_boardLayout) gOrig_boardLayout(self, _cmd);
 
-    // New board detection: reset previous game state
+    // Khi chuyển ván hoặc đổi màn hình bàn cờ
     if (self != gBoardView) {
         gBoardView = self;
         resetForNewGame(@"Phát hiện bàn cờ mới từ giao diện");
@@ -769,7 +836,8 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
         }
     }
 
-    if (gCurrentArrows.count) {
+    // Chỉ hiển thị mũi tên nếu đang là lượt của người dùng
+    if (gCurrentArrows.count && (gMyColor == gTurnColor)) {
         drawArrows(gCurrentArrows, self, gBoardFlipped, gLastWasThreat);
     }
 }
@@ -791,7 +859,6 @@ static OrigGameStateFen gOrig_gameStateFen = NULL;
 static id hook_GameStateFen(id self, SEL _cmd) {
     if (self != gLatestGameState) {
         gLatestGameState = self;
-        resetForNewGame(@"Phát hiện GameState mới");
     }
     updateOrientationFromGameState(self);
 
@@ -814,16 +881,14 @@ static OrigGameStateSetupModel gOrig_gameStateSetupModel = NULL;
 static id hook_GameStateSetupModel(id self, SEL _cmd) {
     if (self != gLatestGameState) {
         gLatestGameState = self;
-        resetForNewGame(@"Phát hiện GameState mới từ setupModel");
     }
-    updateOrientationFromGameState(self);
-
     id sm = gOrig_gameStateSetupModel ? gOrig_gameStateSetupModel(self, _cmd) : nil;
     if (sm) {
         SEL fnSel = NSSelectorFromString(@"fenNotation");
         if ([sm respondsToSelector:fnSel]) {
             NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
             if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
+                updateOrientationFromSetupModel(sm, fn);
                 processFen(fn);
             }
         }
@@ -837,6 +902,7 @@ static OrigFenNotation gOrig_setupModelFenNotation = NULL;
 static NSString *hook_FenNotation(id self, SEL _cmd) {
     NSString *res = gOrig_setupModelFenNotation ? gOrig_setupModelFenNotation(self, _cmd) : nil;
     if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
+        updateOrientationFromSetupModel(self, res);
         processFen(res);
     }
     return res;
@@ -890,9 +956,7 @@ static void installDuolingoHooks(void) {
     [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
         if (gBoardView && (!gBoardView.window || gBoardView.hidden || gBoardView.alpha < 0.1)) {
             gBoardView = nil;
-            gCurrentFen = nil;
-            gLastEvalFen = nil;
-            clearArrows();
+            resetForNewGame(@"Bàn cờ đã rời khỏi màn hình");
         }
     }];
 }
@@ -1332,11 +1396,13 @@ static void installDuolingoHooks(void) {
 }
 
 - (void)manualResetMatch {
+    id gs = gLatestGameState;
     resetForNewGame(@"Người dùng bấm làm mới ván cờ");
     showToast(@"🔄 Đã làm mới! Đang nhận diện lại bàn cờ...");
-    if (gLatestGameState) {
-        updateOrientationFromGameState(gLatestGameState);
-        NSString *fen = extractFenFromGameState(gLatestGameState);
+    if (gs) {
+        gLatestGameState = gs;
+        updateOrientationFromGameState(gs);
+        NSString *fen = extractFenFromGameState(gs);
         if (fen) processFen(fen);
     }
     [self populate];

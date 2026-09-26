@@ -221,6 +221,10 @@ void engineThread() {
     std::cin.rdbuf(&gIn);
     std::cout.rdbuf(&gOut);
 
+    // Tối ưu hóa hiệu năng Stockfish 18 NNUE trên iOS
+    gIn.push("setoption name Threads value 2\n");
+    gIn.push("setoption name Hash value 16\n");
+
     uci.loop();
 }
 
