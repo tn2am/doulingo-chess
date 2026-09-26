@@ -55,6 +55,12 @@ static NSString *gEvaluatingFen  = nil;
 static NSString *gLastAutoPlayed = nil;
 static __weak UIView *gBoardView = nil;
 
+// Debounce: avoid re-triggering engine on rapid FEN getter calls
+static NSString *gPendingFen     = nil;  // FEN chờ debounce
+static BOOL      gFenDebouncing  = NO;   // Timer đang chạy?
+// Snapshot lượt khi bắt đầu tính toán (dùng để validate callback)
+static NSInteger gTurnWhenFetched = -1;
+
 // Board orientation & Player color (0 = White, 1 = Black)
 static NSInteger gMyColor        = 0;
 static NSInteger gTurnColor      = 0;
@@ -192,6 +198,10 @@ static void resetForNewGame(NSString *reason) {
     gLastWasThreat = NO;
     gLatestGameState = nil;
     gMyColorLocked = NO;
+    // Hủy debounce đang chờ để không tính toán FEN cũ
+    gPendingFen = nil;
+    gFenDebouncing = NO;
+    gTurnWhenFetched = -1;
     clearArrows();
 }
 
@@ -627,9 +637,26 @@ static UIView *findActiveBoardView(void) {
 // Forward declaration
 static void fetchMove(NSString *fen);
 
-// --- FAST ENGINE DISPATCHER ---
+// Hàm thực sự kích hoạt engine — gọi SAU debounce 80ms
+static void _dispatchFetchMove(NSString *cleanFen) {
+    // Nếu FEN không đổi và đã có mũi tên rồi → giữ nguyên
+    if ([cleanFen isEqualToString:gLastEvalFen] && gCurrentArrows.count > 0) return;
+
+    gCurrentFen = [cleanFen copy];
+    parseFEN(cleanFen);
+    gTurnWhenFetched = gTurnColor;  // Snapshot lượt tại thời điểm bắt đầu tính
+
+    fetchMove(cleanFen);
+}
+
+// --- FAST ENGINE DISPATCHER (với debounce 80ms) ---
 static void processFen(NSString *fen) {
     if (!fen || ![fen isKindOfClass:[NSString class]] || fen.length < 10) return;
+    // Chỉ chạy trên main thread
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ processFen(fen); });
+        return;
+    }
 
     NSString *cleanFen = [fen stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSArray *parts = [cleanFen componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
@@ -646,18 +673,29 @@ static void processFen(NSString *fen) {
         }
     }
 
-    // Nếu FEN không đổi và đã đánh giá xong thì không cần xử lý lại
+    // Nếu FEN không đổi gì và đã có mũi tên thì không cần làm gì
     if ([cleanFen isEqualToString:gCurrentFen] && [cleanFen isEqualToString:gLastEvalFen] && gCurrentArrows.count > 0) {
         return;
     }
 
-    gCurrentFen = [cleanFen copy];
-    parseFEN(cleanFen);
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        fetchMove(cleanFen);
+    // --- DEBOUNCE 80ms ---
+    // Lưu FEN mới nhất vào pending, nếu timer chưa chạy thì tạo mới
+    gPendingFen = [cleanFen copy];
+    if (gFenDebouncing) {
+        // Timer đang chạy → chỉ cập nhật gPendingFen, không tạo timer mới
+        return;
+    }
+    gFenDebouncing = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gFenDebouncing = NO;
+        NSString *stableFen = gPendingFen;
+        gPendingFen = nil;
+        if (stableFen) {
+            _dispatchFetchMove(stableFen);
+        }
     });
 }
+
 
 static void fetchMove(NSString *fen) {
     if (!gEnabled || !fen.length) return;
@@ -667,9 +705,10 @@ static void fetchMove(NSString *fen) {
         if (gBoardView) updateBoardFlipped();
     }
 
-    parseFEN(fen);
-
-    BOOL isOurTurn = (gMyColor == gTurnColor);
+    // gTurnColor đã được set bởi _dispatchFetchMove → parseFEN, không cần gọi lại
+    // Lưu snapshot lượt tại thời điểm bắt đầu tính để validate trong callback
+    NSInteger turnSnapshot = gTurnWhenFetched;
+    BOOL isOurTurn = (gMyColor == turnSnapshot);
 
     // 1. NẾU LÀ LƯỢT ĐỐI THỦ:
     if (!isOurTurn) {
@@ -679,7 +718,7 @@ static void fetchMove(NSString *fen) {
         gBestEvalStr = @"⏳ Đang chờ đối thủ đi...";
         gEvaluatingFen = nil;
         dbg([NSString stringWithFormat:@"[LƯỢT ĐỐI THỦ] Đã xóa mũi tên và dừng engine (Bạn: %@, Lượt FEN: %@)",
-             gMyColor == 0 ? @"Trắng" : @"Đen", gTurnColor == 0 ? @"Trắng" : @"Đen"]);
+             gMyColor == 0 ? @"Trắng" : @"Đen", turnSnapshot == 0 ? @"Trắng" : @"Đen"]);
         return;
     }
 
@@ -701,11 +740,10 @@ static void fetchMove(NSString *fen) {
     if (gUseMaia && MaiaAvailable()) {
         MaiaGo([fen UTF8String], (int)gElo, (int)gElo, ^(MaiaResult res) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!res.ok) {
-                    gEvaluatingFen = nil;
-                    return;
-                }
+                if (!res.ok) { gEvaluatingFen = nil; return; }
+                // Kiểm tra: FEN còn hiệu lực và vẫn là lượt của mình
                 if (![fen isEqualToString:gCurrentFen]) return;
+                if (gMyColor != gTurnColor) return;  // Lượt đã đổi → bỏ kết quả
 
                 gLastEvalFen = [fen copy];
                 gEvaluatingFen = nil;
@@ -742,11 +780,10 @@ static void fetchMove(NSString *fen) {
 
     EngineGo([fen UTF8String], depth, (int)gElo, multipv, ^(const EngineLine *lines, int count) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (count <= 0) {
-                gEvaluatingFen = nil;
-                return;
-            }
+            if (count <= 0) { gEvaluatingFen = nil; return; }
+            // Kiểm tra: FEN còn hiệu lực và vẫn là lượt của mình
             if (![fen isEqualToString:gCurrentFen]) return;
+            if (gMyColor != gTurnColor) return;  // Lượt đã đổi → bỏ kết quả
 
             gLastEvalFen = [fen copy];
             gEvaluatingFen = nil;
@@ -794,6 +831,7 @@ static void fetchMove(NSString *fen) {
         });
     });
 }
+
 
 static NSInteger detectColorValue(id obj) {
     if (!obj) return -1;
@@ -1021,7 +1059,8 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
     if (gLatestGameState) {
         NSString *fen = extractFenFromGameState(gLatestGameState);
         if (fen.length > 10 && ![fen isEqualToString:gCurrentFen]) {
-            processFen(fen);
+            // KHÔNG gọi processFen — layoutSubviews rất thường xuyên, sẽ bypass debounce.
+            // Chỉ cập nhật gCurrentFen nếu khác, processFen sẽ tự được trigger từ hook_FenString
         }
     }
 
@@ -1124,17 +1163,11 @@ static id hook_GameStateFen(id self, SEL _cmd) {
     }
 
     id fenObj = gOrig_gameStateFen ? gOrig_gameStateFen(self, _cmd) : nil;
-    if (fenObj) {
-        SEL fsSel = NSSelectorFromString(@"fenString");
-        if ([fenObj respondsToSelector:fsSel]) {
-            NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fsSel);
-            if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
-                processFen(fs);
-            }
-        }
-    }
+    // KHÔNG gọi processFen tại đây — tránh double-processing với hook_FenString.
+    // hook_FenString là nguồn duy nhất kích hoạt engine.
     return fenObj;
 }
+
 
 typedef id (*OrigGameStateSetupModel)(id, SEL);
 static OrigGameStateSetupModel gOrig_gameStateSetupModel = NULL;
