@@ -566,6 +566,34 @@ static UIView *findBoardInView(UIView *root) {
     return root;
 }
 
+static void scanViewHierarchy(UIView *v, int *bestScore, UIView **bestBoard) {
+    if (!v || v.hidden || v.alpha < 0.1) return;
+    CGRect b = v.bounds;
+    CGFloat w = b.size.width;
+    CGFloat h = b.size.height;
+    NSString *clsName = NSStringFromClass([v class]);
+
+    int score = -1;
+    if ([clsName containsString:@"ChessBoardView"] || [clsName containsString:@"StaticChessBoardView"] || [clsName containsString:@"ChessBoardRiveWrapper"]) {
+        score = 100;
+    } else if ([clsName containsString:@"ChessOscarBoardView"] || [clsName containsString:@"ChessUnityView"]) {
+        score = 90;
+    } else if ([clsName containsString:@"ChessPvPMatchContentView"] || [clsName containsString:@"ChessPvPMatchContainerView"] || [clsName containsString:@"ChessMatchContainerView"]) {
+        score = 50;
+    } else if (w >= 180 && h >= 180 && fabs(w - h) < 40.0 && [clsName containsString:@"Chess"]) {
+        score = 70;
+    }
+
+    if (score > *bestScore && w >= 150 && h >= 150) {
+        *bestScore = score;
+        *bestBoard = v;
+    }
+
+    for (UIView *sub in v.subviews) {
+        scanViewHierarchy(sub, bestScore, bestBoard);
+    }
+}
+
 static UIView *findActiveBoardView(void) {
     UIWindow *keyWin = nil;
     if (@available(iOS 13.0, *)) {
@@ -585,42 +613,9 @@ static UIView *findActiveBoardView(void) {
     if (!keyWin) keyWin = [UIApplication sharedApplication].keyWindow;
     if (!keyWin) return nil;
 
-    __block UIView *bestBoard = nil;
-    __block int bestScore = -1;
-
-    void (^checkView)(UIView *, void (^)(UIView *)) = ^(UIView *v, void (^recurse)(UIView *)) {
-        if (!v || v.hidden || v.alpha < 0.1) return;
-        CGRect b = v.bounds;
-        CGFloat w = b.size.width;
-        CGFloat h = b.size.height;
-        NSString *clsName = NSStringFromClass([v class]);
-
-        int score = -1;
-        if ([clsName containsString:@"ChessBoardView"] || [clsName containsString:@"StaticChessBoardView"] || [clsName containsString:@"ChessBoardRiveWrapper"]) {
-            score = 100;
-        } else if ([clsName containsString:@"ChessOscarBoardView"] || [clsName containsString:@"ChessUnityView"]) {
-            score = 90;
-        } else if ([clsName containsString:@"ChessPvPMatchContentView"] || [clsName containsString:@"ChessPvPMatchContainerView"] || [clsName containsString:@"ChessMatchContainerView"]) {
-            score = 50;
-        } else if (w >= 180 && h >= 180 && fabs(w - h) < 40.0 && [clsName containsString:@"Chess"]) {
-            score = 70;
-        }
-
-        if (score > bestScore && w >= 150 && h >= 150) {
-            bestScore = score;
-            bestBoard = v;
-        }
-
-        for (UIView *sub in v.subviews) {
-            recurse(sub);
-        }
-    };
-
-    void (^recurseBlock)(UIView *) = ^(UIView *v) {
-        checkView(v, recurseBlock);
-    };
-
-    recurseBlock(keyWin);
+    UIView *bestBoard = nil;
+    int bestScore = -1;
+    scanViewHierarchy(keyWin, &bestScore, &bestBoard);
 
     if (bestBoard) {
         UIView *inner = findBoardInView(bestBoard);
