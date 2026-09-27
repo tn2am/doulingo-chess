@@ -708,17 +708,13 @@ static void performAutoPlay(NSString *moveUCI, UIView *board) {
 static UIView *findBoardInView(UIView *root) {
     if (!root) return nil;
 
-    // Ưu tiên cao nhất: Tìm ChessBoardRiveWrapper (đây là canvas 1:1 hình vuông thực tế chứa 64 ô cờ)
     NSString *rootName = NSStringFromClass([root class]);
     if ([rootName containsString:@"ChessBoardRiveWrapper"]) {
         return root;
     }
+
     for (UIView *sub in root.subviews) {
         if (!sub.hidden && sub.alpha > 0.1) {
-            NSString *cn = NSStringFromClass([sub class]);
-            if ([cn containsString:@"ChessBoardRiveWrapper"]) {
-                return sub;
-            }
             UIView *deep = findBoardInView(sub);
             if (deep && [NSStringFromClass([deep class]) containsString:@"ChessBoardRiveWrapper"]) {
                 return deep;
@@ -726,7 +722,6 @@ static UIView *findBoardInView(UIView *root) {
         }
     }
 
-    // Ưu tiên 2: ChessBoardView hoặc StaticChessBoardView
     if ([rootName containsString:@"ChessBoardView"] || [rootName containsString:@"StaticChessBoardView"] ||
         [rootName containsString:@"ChessOscarBoardView"] || [rootName containsString:@"ChessUnityView"]) {
         for (UIView *sub in root.subviews) {
@@ -749,14 +744,15 @@ static UIView *findBoardInView(UIView *root) {
                 return sub;
             }
             if (sub.bounds.size.width >= 180 && sub.bounds.size.height >= 180 &&
-                fabs(sub.bounds.size.width - sub.bounds.size.height) < 40.0) {
+                fabs(sub.bounds.size.width - sub.bounds.size.height) < 40.0 &&
+                [cn containsString:@"Chess"]) {
                 return sub;
             }
             UIView *deep = findBoardInView(sub);
-            if (deep && deep != root) return deep;
+            if (deep) return deep;
         }
     }
-    return root;
+    return nil;
 }
 
 static void scanViewHierarchy(UIView *v, int *bestScore, UIView **bestBoard) {
@@ -1236,7 +1232,6 @@ static NSString *extractFenFromGameState(id gs) {
             if ([fenObj respondsToSelector:fenStrSel]) {
                 NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fenStrSel);
                 if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
-                    detectColorFromGameState(gs);
                     return fs;
                 }
             }
@@ -1244,7 +1239,6 @@ static NSString *extractFenFromGameState(id gs) {
             if ([fenObj respondsToSelector:fnSel]) {
                 NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fnSel);
                 if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
-                    detectColorFromGameState(gs);
                     return fn;
                 }
             }
@@ -1256,7 +1250,6 @@ static NSString *extractFenFromGameState(id gs) {
     if ([gs respondsToSelector:gsFnSel]) {
         NSString *gfn = ((NSString *(*)(id, SEL))objc_msgSend)(gs, gsFnSel);
         if (gfn && [gfn isKindOfClass:[NSString class]] && gfn.length > 10) {
-            detectColorFromGameState(gs);
             return gfn;
         }
     }
@@ -1266,7 +1259,6 @@ static NSString *extractFenFromGameState(id gs) {
     if ([gs respondsToSelector:setupSel]) {
         id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
         if (sm) {
-            detectColorFromSetupModel(sm);
             SEL fnSel = NSSelectorFromString(@"fenNotation");
             if ([sm respondsToSelector:fnSel]) {
                 NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(sm, fnSel);
@@ -1309,10 +1301,11 @@ static CFMutableDictionaryRef gOrigLayoutMap = NULL;
 typedef void (*OrigLayout)(id, SEL);
 
 static void hook_BoardLayout(UIView *self, SEL _cmd) {
-    Class cls = [self class];
+    Class curCls = object_getClass(self);
     OrigLayout orig = NULL;
-    if (gOrigLayoutMap) {
-        orig = (OrigLayout)CFDictionaryGetValue(gOrigLayoutMap, (__bridge const void *)(cls));
+    while (curCls && !orig) {
+        if (gOrigLayoutMap) orig = (OrigLayout)CFDictionaryGetValue(gOrigLayoutMap, (__bridge const void *)(curCls));
+        if (!orig) curCls = class_getSuperclass(curCls);
     }
     if (orig) {
         orig(self, _cmd);
@@ -1358,9 +1351,11 @@ static CFMutableDictionaryRef gOrigTouchesEndedMap = NULL;
 typedef void (*OrigTouchesEnded)(UIView *, SEL, NSSet *, UIEvent *);
 
 static void hook_BoardTouchesEnded(UIView *self, SEL _cmd, NSSet *touches, UIEvent *event) {
+    Class curCls = object_getClass(self);
     OrigTouchesEnded orig = NULL;
-    if (gOrigTouchesEndedMap) {
-        orig = (OrigTouchesEnded)CFDictionaryGetValue(gOrigTouchesEndedMap, (__bridge const void *)[self class]);
+    while (curCls && !orig) {
+        if (gOrigTouchesEndedMap) orig = (OrigTouchesEnded)CFDictionaryGetValue(gOrigTouchesEndedMap, (__bridge const void *)(curCls));
+        if (!orig) curCls = class_getSuperclass(curCls);
     }
     if (orig) orig(self, _cmd, touches, event);
 
@@ -1405,9 +1400,11 @@ static CFMutableDictionaryRef gOrigSetDisplayedGameStateMap = NULL;
 typedef void (*OrigSetDisplayedGameState)(id, SEL, id);
 
 static void hook_SetDisplayedGameState(id self, SEL _cmd, id newGs) {
+    Class curCls = object_getClass(self);
     OrigSetDisplayedGameState orig = NULL;
-    if (gOrigSetDisplayedGameStateMap) {
-        orig = (OrigSetDisplayedGameState)CFDictionaryGetValue(gOrigSetDisplayedGameStateMap, (__bridge const void *)[self class]);
+    while (curCls && !orig) {
+        if (gOrigSetDisplayedGameStateMap) orig = (OrigSetDisplayedGameState)CFDictionaryGetValue(gOrigSetDisplayedGameStateMap, (__bridge const void *)(curCls));
+        if (!orig) curCls = class_getSuperclass(curCls);
     }
     if (orig) orig(self, _cmd, newGs);
 
@@ -1436,10 +1433,11 @@ static CFMutableDictionaryRef gOrigVCAppearMap = NULL;
 typedef void (*OrigVCAppear)(UIViewController *, SEL, BOOL);
 
 static void hook_VCViewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
-    Class cls = [self class];
+    Class curCls = object_getClass(self);
     OrigVCAppear orig = NULL;
-    if (gOrigVCAppearMap) {
-        orig = (OrigVCAppear)CFDictionaryGetValue(gOrigVCAppearMap, (__bridge const void *)(cls));
+    while (curCls && !orig) {
+        if (gOrigVCAppearMap) orig = (OrigVCAppear)CFDictionaryGetValue(gOrigVCAppearMap, (__bridge const void *)(curCls));
+        if (!orig) curCls = class_getSuperclass(curCls);
     }
     if (orig) {
         orig(self, _cmd, animated);
