@@ -525,6 +525,13 @@ static void performAutoPlay(NSString *moveUCI, UIView *board) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     chFakeTouchFire(toWin, win, UITouchPhaseEnded);
 
+                    // Xóa mũi tên và dọn dẹp trạng thái ngay khi vừa đi nước cờ
+                    clearArrows();
+                    EngineStop();
+                    gEvaluatingFen = nil;
+                    gBestMoveStr = nil;
+                    gBestEvalStr = @"⏳ Đang chờ đối thủ đi...";
+
                     // Bước 3: Nếu là nước phong cấp (Promotion)
                     if (promo) {
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -690,9 +697,8 @@ static void fetchMove(NSString *fen) {
     }
 
     // Nếu FEN này đã được đánh giá xong và đang có mũi tên hiển thị rồi thì giữ nguyên
-    if ([fen isEqualToString:gLastEvalFen] && gCurrentArrows.count > 0) {
-        return;
-    }
+    // Dừng mọi tính toán dở dang cũ để ưu tiên 100% tài nguyên cho FEN mới nhất
+    EngineStop();
 
     gEvaluatingFen = [fen copy];
     dbg([NSString stringWithFormat:@"[LƯỢT CỦA BẠN] Bắt đầu tính toán cho %@: %@",
@@ -705,7 +711,11 @@ static void fetchMove(NSString *fen) {
                     gEvaluatingFen = nil;
                     return;
                 }
-                if (![fen isEqualToString:gCurrentFen]) return;
+                // Hủy ngay nếu FEN đã đổi hoặc lượt cờ không còn là của người chơi
+                if (![fen isEqualToString:gCurrentFen] || (gMyColor != gTurnColor)) {
+                    gEvaluatingFen = nil;
+                    return;
+                }
 
                 gLastEvalFen = [fen copy];
                 gEvaluatingFen = nil;
@@ -746,7 +756,11 @@ static void fetchMove(NSString *fen) {
                 gEvaluatingFen = nil;
                 return;
             }
-            if (![fen isEqualToString:gCurrentFen]) return;
+            // Hủy ngay nếu FEN đã đổi hoặc lượt cờ không còn là của người chơi
+            if (![fen isEqualToString:gCurrentFen] || (gMyColor != gTurnColor)) {
+                gEvaluatingFen = nil;
+                return;
+            }
 
             gLastEvalFen = [fen copy];
             gEvaluatingFen = nil;
@@ -853,9 +867,9 @@ static void updateBoardFlipped(void) {
     }
 }
 
-// Nhận diện và KHÓA CỨNG màu quân cho người chơi từ setupModel ban đầu
+// Nhận diện màu quân cho người chơi từ setupModel ban đầu
 static void detectColorFromSetupModel(id sm) {
-    if (!sm || gMyColorLocked) return;
+    if (!sm) return;
     SEL umnSel = NSSelectorFromString(@"userMovesNext");
     if (![sm respondsToSelector:umnSel]) return;
 
@@ -883,16 +897,17 @@ static void detectColorFromSetupModel(id sm) {
     //   userMovesNext == YES -> Bạn cầm Đen (1)
     //   userMovesNext == NO  -> Bạn cầm Trắng (0)
     NSInteger detected = isWhiteFirst ? (umn ? 0 : 1) : (umn ? 1 : 0);
-    gMyColor = detected;
-    gMyColorLocked = YES;
-    updateBoardFlipped();
-
-    dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Bạn là: %@ (Setup userMovesNext=%d, isWhiteFirst=%d, initFen=%@)",
-         gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫", (int)umn, (int)isWhiteFirst, initFen]);
+    if (detected != gMyColor || !gMyColorLocked) {
+        gMyColor = detected;
+        gMyColorLocked = YES;
+        updateBoardFlipped();
+        dbg([NSString stringWithFormat:@"[NHẬN DIỆN MÀU SETUP] Bạn là: %@ (Setup userMovesNext=%d, isWhiteFirst=%d, initFen=%@)",
+             gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫", (int)umn, (int)isWhiteFirst, initFen]);
+    }
 }
 
 static void detectColorFromGameState(id gs) {
-    if (!gs || gMyColorLocked) return;
+    if (!gs) return;
 
     NSInteger detected = -1;
 
@@ -902,11 +917,13 @@ static void detectColorFromGameState(id gs) {
         id uc = ((id (*)(id, SEL))objc_msgSend)(gs, ucSel);
         detected = detectColorValue(uc);
         if (detected >= 0) {
-            gMyColor = detected;
-            gMyColorLocked = YES;
-            updateBoardFlipped();
-            dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Nhận diện chuẩn từ GameState.userColor: %@",
-                 gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+            if (detected != gMyColor || !gMyColorLocked) {
+                gMyColor = detected;
+                gMyColorLocked = YES;
+                updateBoardFlipped();
+                dbg([NSString stringWithFormat:@"[NHẬN DIỆN MÀU CHUẨN] GameState.userColor: %@",
+                     gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+            }
             return;
         }
     }
@@ -919,11 +936,13 @@ static void detectColorFromGameState(id gs) {
             id uc = ((id (*)(id, SEL))objc_msgSend)(gs, s);
             detected = detectColorValue(uc);
             if (detected >= 0) {
-                gMyColor = detected;
-                gMyColorLocked = YES;
-                updateBoardFlipped();
-                dbg([NSString stringWithFormat:@"[KHÓA MÀU VÁN CỜ] Nhận diện từ GameState.%@: %@",
-                     sName, gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+                if (detected != gMyColor || !gMyColorLocked) {
+                    gMyColor = detected;
+                    gMyColorLocked = YES;
+                    updateBoardFlipped();
+                    dbg([NSString stringWithFormat:@"[NHẬN DIỆN MÀU] GameState.%@: %@",
+                         sName, gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+                }
                 return;
             }
         }
@@ -951,14 +970,32 @@ static NSString *extractFenFromGameState(id gs) {
             if ([fenObj respondsToSelector:fenStrSel]) {
                 NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fenStrSel);
                 if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
-                    if (!gMyColorLocked) detectColorFromGameState(gs);
+                    detectColorFromGameState(gs);
                     return fs;
+                }
+            }
+            SEL fnSel = NSSelectorFromString(@"fenNotation");
+            if ([fenObj respondsToSelector:fnSel]) {
+                NSString *fn = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fnSel);
+                if (fn && [fn isKindOfClass:[NSString class]] && fn.length > 10) {
+                    detectColorFromGameState(gs);
+                    return fn;
                 }
             }
         }
     }
 
-    // 2. Dự phòng: lấy FEN ban đầu từ setupModel
+    // 2. Kiểm tra GameState.fenNotation trực tiếp
+    SEL gsFnSel = NSSelectorFromString(@"fenNotation");
+    if ([gs respondsToSelector:gsFnSel]) {
+        NSString *gfn = ((NSString *(*)(id, SEL))objc_msgSend)(gs, gsFnSel);
+        if (gfn && [gfn isKindOfClass:[NSString class]] && gfn.length > 10) {
+            detectColorFromGameState(gs);
+            return gfn;
+        }
+    }
+
+    // 3. Dự phòng: lấy FEN ban đầu từ setupModel
     SEL setupSel = NSSelectorFromString(@"setupModel");
     if ([gs respondsToSelector:setupSel]) {
         id sm = ((id (*)(id, SEL))objc_msgSend)(gs, setupSel);
@@ -993,6 +1030,13 @@ static void SwizzleInstanceMethod(Class cls, SEL origSel, IMP newImp, IMP *origI
     }
 }
 
+static void SwizzleClassMethod(Class cls, SEL origSel, IMP newImp, IMP *origImp) {
+    if (!cls || !origSel || !newImp) return;
+    Class metaCls = object_getClass((id)cls);
+    if (!metaCls) return;
+    SwizzleInstanceMethod(metaCls, origSel, newImp, origImp);
+}
+
 // --- SAFE MULTI-CLASS HOOK DEFINITIONS ---
 
 static CFMutableDictionaryRef gOrigLayoutMap = NULL;
@@ -1019,6 +1063,7 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
     }
 
     if (gLatestGameState) {
+        detectColorFromGameState(gLatestGameState);
         NSString *fen = extractFenFromGameState(gLatestGameState);
         if (fen.length > 10 && ![fen isEqualToString:gCurrentFen]) {
             processFen(fen);
@@ -1030,6 +1075,26 @@ static void hook_BoardLayout(UIView *self, SEL _cmd) {
         drawArrows(gCurrentArrows, gBoardView, gBoardFlipped, gLastWasThreat);
     } else if (gMyColor != gTurnColor) {
         clearArrows();
+    }
+}
+
+static CFMutableDictionaryRef gOrigTouchesEndedMap = NULL;
+typedef void (*OrigTouchesEnded)(UIView *, SEL, NSSet *, UIEvent *);
+
+static void hook_BoardTouchesEnded(UIView *self, SEL _cmd, NSSet *touches, UIEvent *event) {
+    OrigTouchesEnded orig = NULL;
+    if (gOrigTouchesEndedMap) {
+        orig = (OrigTouchesEnded)CFDictionaryGetValue(gOrigTouchesEndedMap, (__bridge const void *)[self class]);
+    }
+    if (orig) orig(self, _cmd, touches, event);
+
+    // Khi người dùng vừa thả quân cờ: Dọn dẹp gợi ý cũ ngay lập tức nếu vừa là lượt của người dùng
+    if (gMyColor == gTurnColor) {
+        clearArrows();
+        EngineStop();
+        gEvaluatingFen = nil;
+        gBestMoveStr = nil;
+        gBestEvalStr = @"⏳ Đang xử lý nước đi...";
     }
 }
 
@@ -1068,17 +1133,29 @@ static void hookBoardClass(Class cls) {
     if (!cls) return;
     SEL sel = @selector(layoutSubviews);
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return;
-
-    IMP origImp = method_getImplementation(m);
-    if (!gOrigLayoutMap) {
-        gOrigLayoutMap = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+    if (m) {
+        IMP origImp = method_getImplementation(m);
+        if (!gOrigLayoutMap) {
+            gOrigLayoutMap = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+        }
+        if (!CFDictionaryContainsKey(gOrigLayoutMap, (__bridge const void *)(cls))) {
+            CFDictionarySetValue(gOrigLayoutMap, (__bridge const void *)(cls), (const void *)origImp);
+        }
+        class_replaceMethod(cls, sel, (IMP)hook_BoardLayout, method_getTypeEncoding(m));
     }
-    if (!CFDictionaryContainsKey(gOrigLayoutMap, (__bridge const void *)(cls))) {
-        CFDictionarySetValue(gOrigLayoutMap, (__bridge const void *)(cls), (const void *)origImp);
-    }
 
-    class_replaceMethod(cls, sel, (IMP)hook_BoardLayout, method_getTypeEncoding(m));
+    SEL teSel = @selector(touchesEnded:withEvent:);
+    Method teM = class_getInstanceMethod(cls, teSel);
+    if (teM) {
+        IMP origTEImp = method_getImplementation(teM);
+        if (!gOrigTouchesEndedMap) {
+            gOrigTouchesEndedMap = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+        }
+        if (!CFDictionaryContainsKey(gOrigTouchesEndedMap, (__bridge const void *)(cls))) {
+            CFDictionarySetValue(gOrigTouchesEndedMap, (__bridge const void *)(cls), (const void *)origTEImp);
+        }
+        class_replaceMethod(cls, teSel, (IMP)hook_BoardTouchesEnded, method_getTypeEncoding(teM));
+    }
 }
 
 static void hookVCClass(Class cls) {
@@ -1098,16 +1175,30 @@ static void hookVCClass(Class cls) {
     class_replaceMethod(cls, sel, (IMP)hook_VCViewDidAppear, method_getTypeEncoding(m));
 }
 
+// --- FEN & GAME STATE HOOKS ---
+
 typedef NSString *(*OrigFenString)(id, SEL);
 static OrigFenString gOrig_fenString = NULL;
 
 static NSString *hook_FenString(id self, SEL _cmd) {
     NSString *res = gOrig_fenString ? gOrig_fenString(self, _cmd) : nil;
     if (res && [res isKindOfClass:[NSString class]] && res.length > 10) {
-        if (!gMyColorLocked && gLatestGameState) {
+        if (gLatestGameState) {
             detectColorFromGameState(gLatestGameState);
         }
         processFen(res);
+    }
+    return res;
+}
+
+// Hook +[DuolingoMultiplatformChessFen createFenNotation:]
+typedef id (*OrigFenCreateNotation)(id, SEL, NSString *);
+static OrigFenCreateNotation gOrig_fenCreateNotation = NULL;
+static id hook_fenCreateNotation(id self, SEL _cmd, NSString *fenNotation) {
+    id res = gOrig_fenCreateNotation ? gOrig_fenCreateNotation(self, _cmd, fenNotation) : nil;
+    if (fenNotation && [fenNotation isKindOfClass:[NSString class]] && fenNotation.length > 10) {
+        dbg([NSString stringWithFormat:@"[TẠO FEN MỚI] createFenNotation: %@", fenNotation]);
+        processFen(fenNotation);
     }
     return res;
 }
@@ -1119,9 +1210,7 @@ static id hook_GameStateFen(id self, SEL _cmd) {
     if (self != gLatestGameState) {
         gLatestGameState = self;
     }
-    if (!gMyColorLocked) {
-        detectColorFromGameState(self);
-    }
+    detectColorFromGameState(self);
 
     id fenObj = gOrig_gameStateFen ? gOrig_gameStateFen(self, _cmd) : nil;
     if (fenObj) {
@@ -1173,6 +1262,108 @@ static NSString *hook_FenNotation(id self, SEL _cmd) {
     return res;
 }
 
+// Hook -[DuolingoMultiplatformChessGameSetupModel initWithFenNotation:moveHistory:userMovesNext:useStars:checkForCheck:shouldAdvanceTurn:pointChangeAnimationSetting:initialMoveIndex:shouldRecordAccoladeDetails:]
+typedef id (*OrigSetupModelInit)(id, SEL, NSString *, id, BOOL, BOOL, BOOL, BOOL, id, NSInteger, BOOL);
+static OrigSetupModelInit gOrig_setupModelInit = NULL;
+static id hook_setupModelInit(id self, SEL _cmd, NSString *fen, id hist, BOOL umn, BOOL stars, BOOL check, BOOL advance, id anim, NSInteger initIdx, BOOL record) {
+    id res = gOrig_setupModelInit ? gOrig_setupModelInit(self, _cmd, fen, hist, umn, stars, check, advance, anim, initIdx, record) : nil;
+    resetForNewGame(@"Khởi tạo GameSetupModel ván mới");
+    gLastSetupModel = res;
+    detectColorFromSetupModel(res);
+    if (fen && [fen isKindOfClass:[NSString class]] && fen.length > 10) {
+        processFen(fen);
+    }
+    return res;
+}
+
+// Hook +[DuolingoMultiplatformChessGameState createFromFenFenNotation:shouldRecordAccoladeDetails:]
+typedef id (*OrigCreateFromFen)(id, SEL, NSString *, BOOL);
+static OrigCreateFromFen gOrig_createFromFen = NULL;
+static id hook_createFromFen(id self, SEL _cmd, NSString *fenNotation, BOOL record) {
+    id res = gOrig_createFromFen ? gOrig_createFromFen(self, _cmd, fenNotation, record) : nil;
+    if (res) {
+        gLatestGameState = res;
+        detectColorFromGameState(res);
+    }
+    if (fenNotation && [fenNotation isKindOfClass:[NSString class]] && fenNotation.length > 10) {
+        dbg([NSString stringWithFormat:@"[TRẠNG THÁI GAME MỚI] createFromFen: %@", fenNotation]);
+        processFen(fenNotation);
+    }
+    return res;
+}
+
+// Hook +[DuolingoMultiplatformChessGameState constructFromFenFen:]
+typedef id (*OrigConstructFromFen)(id, SEL, id);
+static OrigConstructFromFen gOrig_constructFromFen = NULL;
+static id hook_constructFromFen(id self, SEL _cmd, id fenObj) {
+    id res = gOrig_constructFromFen ? gOrig_constructFromFen(self, _cmd, fenObj) : nil;
+    if (res) {
+        gLatestGameState = res;
+        detectColorFromGameState(res);
+    }
+    if (fenObj) {
+        SEL fsSel = NSSelectorFromString(@"fenString");
+        if ([fenObj respondsToSelector:fsSel]) {
+            NSString *fs = ((NSString *(*)(id, SEL))objc_msgSend)(fenObj, fsSel);
+            if (fs && [fs isKindOfClass:[NSString class]] && fs.length > 10) {
+                processFen(fs);
+            }
+        }
+    }
+    return res;
+}
+
+// Hook +[DuolingoMultiplatformChessGameState createForMatchUserMovesNext:shouldRecordAccoladeDetails:]
+typedef id (*OrigCreateForMatch)(id, SEL, BOOL, BOOL);
+static OrigCreateForMatch gOrig_createForMatch = NULL;
+static id hook_createForMatch(id self, SEL _cmd, BOOL umn, BOOL record) {
+    id res = gOrig_createForMatch ? gOrig_createForMatch(self, _cmd, umn, record) : nil;
+    if (res) {
+        gLatestGameState = res;
+        resetForNewGame(@"Khởi tạo trận đấu mới createForMatch");
+        gMyColor = umn ? 0 : 1;
+        updateBoardFlipped();
+        dbg([NSString stringWithFormat:@"[VÁN MỚI createForMatch] userMovesNext=%d -> Bạn là: %@",
+             (int)umn, gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+        NSString *fen = extractFenFromGameState(res);
+        if (fen) processFen(fen);
+    }
+    return res;
+}
+
+// Hook +[DuolingoMultiplatformChessGameState createForResumedMatchFenNotation:moveHistory:userMovesNext:]
+typedef id (*OrigCreateResumedMatch)(id, SEL, NSString *, id, BOOL);
+static OrigCreateResumedMatch gOrig_createResumedMatch = NULL;
+static id hook_createResumedMatch(id self, SEL _cmd, NSString *fen, id hist, BOOL umn) {
+    id res = gOrig_createResumedMatch ? gOrig_createResumedMatch(self, _cmd, fen, hist, umn) : nil;
+    if (res) {
+        gLatestGameState = res;
+        gMyColor = umn ? 0 : 1;
+        updateBoardFlipped();
+        dbg([NSString stringWithFormat:@"[TIẾP TỤC TRẬN ĐẤU] createForResumedMatch userMovesNext=%d -> Bạn: %@",
+             (int)umn, gMyColor == 0 ? @"TRẮNG ⚪" : @"ĐEN ⚫"]);
+    }
+    if (fen && [fen isKindOfClass:[NSString class]] && fen.length > 10) {
+        processFen(fen);
+    }
+    return res;
+}
+
+// Hook +[DuolingoMultiplatformChessGameState createForMiniMatchFenNotation:]
+typedef id (*OrigCreateMiniMatch)(id, SEL, NSString *);
+static OrigCreateMiniMatch gOrig_createMiniMatch = NULL;
+static id hook_createMiniMatch(id self, SEL _cmd, NSString *fen) {
+    id res = gOrig_createMiniMatch ? gOrig_createMiniMatch(self, _cmd, fen) : nil;
+    if (res) {
+        gLatestGameState = res;
+        detectColorFromGameState(res);
+    }
+    if (fen && [fen isKindOfClass:[NSString class]] && fen.length > 10) {
+        processFen(fen);
+    }
+    return res;
+}
+
 static void installDuolingoHooks(void) {
     static BOOL fenHooked = NO;
     static BOOL gsHooked = NO;
@@ -1183,6 +1374,8 @@ static void installDuolingoHooks(void) {
         Class fenCls = objc_getClass("DuolingoMultiplatformChessFen");
         if (fenCls) {
             SwizzleInstanceMethod(fenCls, NSSelectorFromString(@"fenString"), (IMP)hook_FenString, (IMP *)&gOrig_fenString);
+            SwizzleInstanceMethod(fenCls, NSSelectorFromString(@"fenNotation"), (IMP)hook_FenString, NULL);
+            SwizzleClassMethod(fenCls, NSSelectorFromString(@"createFenNotation:"), (IMP)hook_fenCreateNotation, (IMP *)&gOrig_fenCreateNotation);
             fenHooked = YES;
         }
     }
@@ -1192,6 +1385,13 @@ static void installDuolingoHooks(void) {
         if (gsCls) {
             SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"fen"), (IMP)hook_GameStateFen, (IMP *)&gOrig_gameStateFen);
             SwizzleInstanceMethod(gsCls, NSSelectorFromString(@"setupModel"), (IMP)hook_GameStateSetupModel, (IMP *)&gOrig_gameStateSetupModel);
+
+            SwizzleClassMethod(gsCls, NSSelectorFromString(@"createFromFenFenNotation:shouldRecordAccoladeDetails:"), (IMP)hook_createFromFen, (IMP *)&gOrig_createFromFen);
+            SwizzleClassMethod(gsCls, NSSelectorFromString(@"constructFromFenFen:"), (IMP)hook_constructFromFen, (IMP *)&gOrig_constructFromFen);
+            SwizzleClassMethod(gsCls, NSSelectorFromString(@"createForMatchUserMovesNext:shouldRecordAccoladeDetails:"), (IMP)hook_createForMatch, (IMP *)&gOrig_createForMatch);
+            SwizzleClassMethod(gsCls, NSSelectorFromString(@"createForResumedMatchFenNotation:moveHistory:userMovesNext:"), (IMP)hook_createResumedMatch, (IMP *)&gOrig_createResumedMatch);
+            SwizzleClassMethod(gsCls, NSSelectorFromString(@"createForMiniMatchFenNotation:"), (IMP)hook_createMiniMatch, (IMP *)&gOrig_createMiniMatch);
+
             gsHooked = YES;
         }
     }
@@ -1200,6 +1400,8 @@ static void installDuolingoHooks(void) {
         Class smCls = objc_getClass("DuolingoMultiplatformChessGameSetupModel");
         if (smCls) {
             SwizzleInstanceMethod(smCls, NSSelectorFromString(@"fenNotation"), (IMP)hook_FenNotation, (IMP *)&gOrig_setupModelFenNotation);
+            SEL initSel = NSSelectorFromString(@"initWithFenNotation:moveHistory:userMovesNext:useStars:checkForCheck:shouldAdvanceTurn:pointChangeAnimationSetting:initialMoveIndex:shouldRecordAccoladeDetails:");
+            SwizzleInstanceMethod(smCls, initSel, (IMP)hook_setupModelInit, (IMP *)&gOrig_setupModelInit);
             smHooked = YES;
         }
     }
@@ -1244,26 +1446,58 @@ static void installDuolingoHooks(void) {
         boardHooked = YES;
     }
 
-    // Periodic match check and active board lookup
+    // Periodic match check and active board lookup (tần số cao 0.3s)
     static BOOL timerStarted = NO;
     if (!timerStarted) {
         timerStarted = YES;
-        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+        [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
+            if (!gEnabled) return;
+
+            // 1. Quét tìm và duy trì bàn cờ đang hiển thị
             if (!gBoardView || !gBoardView.window || gBoardView.hidden || gBoardView.alpha < 0.1) {
                 UIView *found = findActiveBoardView();
                 if (found) {
                     if (found != gBoardView) {
                         gBoardView = found;
                         updateBoardFlipped();
-                        dbg([NSString stringWithFormat:@"[TÌM THẤY BÀN CỜ TỰ ĐỘNG] %@", NSStringFromClass([found class])]);
-                    }
-                    if (gCurrentArrows.count && (gMyColor == gTurnColor)) {
-                        drawArrows(gCurrentArrows, gBoardView, gBoardFlipped, gLastWasThreat);
+                        dbg([NSString stringWithFormat:@"[KẾT NỐI BÀN CỜ NHANH] %@", NSStringFromClass([found class])]);
                     }
                 } else if (gBoardView) {
                     gBoardView = nil;
                     resetForNewGame(@"Bàn cờ đã rời khỏi màn hình");
                 }
+            }
+
+            // 2. Tự động nhận diện hướng bàn cờ & màu quân
+            if (gBoardView && gFlipMode == 0) {
+                BOOL flipped = isBoardViewFlipped(gBoardView);
+                if (flipped != gBoardFlipped) {
+                    gBoardFlipped = flipped;
+                    NSInteger newClr = flipped ? 1 : 0;
+                    if (newClr != gMyColor) {
+                        gMyColor = newClr;
+                        dbg([NSString stringWithFormat:@"[NHẬN DIỆN HƯỚNG BÀN CỜ] %@",
+                             flipped ? @"Bàn cờ lật -> Bạn cầm ĐEN ⚫" : @"Bàn cờ chuẩn -> Bạn cầm TRẮNG ⚪"]);
+                    }
+                }
+            }
+
+            // 3. Quét FEN trực tiếp từ GameState để phát hiện nước đi tức thì
+            if (gLatestGameState) {
+                detectColorFromGameState(gLatestGameState);
+                NSString *liveFen = extractFenFromGameState(gLatestGameState);
+                if (liveFen && liveFen.length > 10 && ![liveFen isEqualToString:gCurrentFen]) {
+                    processFen(liveFen);
+                }
+            }
+
+            // 4. Đồng bộ hiển thị mũi tên chính xác theo lượt
+            if (gBoardView && gCurrentArrows.count && (gMyColor == gTurnColor)) {
+                if (!gArrowLayers.count) {
+                    drawArrows(gCurrentArrows, gBoardView, gBoardFlipped, gLastWasThreat);
+                }
+            } else if (gMyColor != gTurnColor && gArrowLayers.count) {
+                clearArrows();
             }
         }];
     }
